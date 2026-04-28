@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Environment variables (Sensitive - MUST NOT BE PUSHED)
+.env
+.env.local
+.env.*
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# User Uploads (Keep the directory structure if needed, but ignore contents)
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log

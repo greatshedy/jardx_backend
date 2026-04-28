@@ -1,0 +1,12 @@
+fastapi==0.121.2
+uvicorn==0.38.0
+python-dotenv==1.2.1
+Jinja2==3.1.6
+astrapy==2.2.1
+argon2-cffi==25.1.0
+python-jose[cryptography]==3.5.0
+cryptography==47.0.0
+pillow==12.2.0
+python-multipart==0.0.20
+google-auth==2.49.2
+requests==2.32.5
