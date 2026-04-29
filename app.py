@@ -29,6 +29,15 @@ logger = logging.getLogger("jardx")
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {
+        "message": "JardX Backend is running",
+        "status": "healthy",
+        "timestamp": time.time()
+    }
+
+
 # Mount static files
 app.mount("/static", StaticFiles(directory=os.path.join(current_dir, "static")), name="static")
 
@@ -42,8 +51,12 @@ templates = Jinja2Templates(directory=os.path.join(current_dir, "templates"))
 app.state.templates = templates
 
 # CORS configuration
-allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*")
-origins = [origin.strip() for origin in allowed_origins_raw.split(",")]
+allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if not allowed_origins_raw:
+    origins = ["*"]
+else:
+    origins = [origin.strip() for origin in allowed_origins_raw.split(",")]
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,9 +101,16 @@ def keep_alive_loop():
     time.sleep(10)
     
     url = os.getenv("BACKEND_BASE_URL")
-    if not url or "10.12.228" in url or "localhost" in url:
-        logger.info("Keep-alive: Skipping (Local environment detected or URL not set)")
+    if not url:
+        logger.info("Keep-alive: Skipping (URL not set)")
         return
+    
+    # Only skip if we are explicitly in a local environment that isn't the one we want to ping
+    # On Render, the URL will be the production one, so it should NOT skip.
+    if ("localhost" in url or "127.0.0.1" in url) and not os.getenv("RENDER"):
+        logger.info(f"Keep-alive: Skipping (Local environment detected: {url})")
+        return
+
 
     logger.info(f"Keep-alive: Starting loop for {url}")
     while True:
