@@ -53,18 +53,18 @@ templates = Jinja2Templates(directory=os.path.join(current_dir, "templates"))
 app.state.templates = templates
 
 # CORS configuration
-allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
-if not allowed_origins_raw or allowed_origins_raw == "*":
+allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+if allowed_origins_raw == "*":
     origins = ["*"]
+    allow_credentials = False
 else:
     origins = [origin.strip() for origin in allowed_origins_raw.split(",")]
-
-
+    allow_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=False,  # Set to False to allow wildcard origins with Bearer tokens
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
