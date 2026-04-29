@@ -23,9 +23,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# User Uploads (Allow images to be committed for deployment)
-# uploads/*
-# !uploads/.gitkeep
+# User Uploads (Allowing all current images for deployment)
+!uploads/
+!uploads/**
+
 
 # Logs
 *.log
