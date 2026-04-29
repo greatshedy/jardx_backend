@@ -23,9 +23,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# User Uploads (Keep the directory structure if needed, but ignore contents)
-uploads/*
-!uploads/.gitkeep
+# User Uploads (Allow images to be committed for deployment)
+# uploads/*
+# !uploads/.gitkeep
 
 # Logs
 *.log
