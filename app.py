@@ -52,19 +52,21 @@ app.state.templates = templates
 
 # CORS configuration
 allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "")
-if not allowed_origins_raw:
+if not allowed_origins_raw or allowed_origins_raw == "*":
     origins = ["*"]
 else:
     origins = [origin.strip() for origin in allowed_origins_raw.split(",")]
 
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,  # Set to True if you need to send cookies/auth headers
+    allow_credentials=False,  # Set to False to allow wildcard origins with Bearer tokens
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 app.include_router(users.router)
