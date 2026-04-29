@@ -2,7 +2,8 @@ from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Requ
 from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection
 import datetime
 import secrets
-from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email
+from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url
+
 from fastapi.responses import JSONResponse, Response
 from utill import generate_otp,get_token,send_email
 import base64
@@ -165,7 +166,8 @@ async def google_auth(payload: GoogleAuth):
                 "referral_code": secrets.token_hex(4).upper(),
                 "referred_by": "",
                 "is_referral_active": False,
-                "referral_percentage": 0.0
+                "referral_percentage": 0.0,
+                "referral_bonus_paid": False
             }
             user_id = user_collection.insert_one(new_user).inserted_id
             user_payload = {"id": user_id}
@@ -452,60 +454,85 @@ async def verify_pin(payload: dict, data: dict = Depends(get_token)):
         logger.error(f"Error in /verify-pin: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
+@router.get("/check-pin")
+async def check_pin(data: dict = Depends(get_token)):
+    try:
+        if not data:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user_id = data["id"]
+        user_data = user_collection.find_one({"_id": user_id})
+        has_pin = user_data.get("transaction_pin") is not None and user_data.get("transaction_pin") != ""
+        return {"has_pin": has_pin, "status": 200}
+    except Exception as e:
+        logger.error(f"Error in /check-pin: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
 
 # User listing endpoint
 @router.post("/listing")
 async def Listing():
-    house_data=house_collection.find({},projection={"house_image":0}).to_list()
-
-    # new_house_data=[]
-    # for i in house_data:
-    #     i["house_image"]=process_base85_image("".join(i["house_image"][0]))
-    #     new_house_data.append(i)
-    print(house_data)
-    return JSONResponse({"message":"House data","data":house_data,"status":status.HTTP_200_OK})
+    house_data=list(house_collection.find({}))
+    data = []
+    for house in house_data:
+        house["_id"] = str(house["_id"])
+        new_images = []
+        for img in house.get("house_image", []):
+            if isinstance(img, list):
+                # Still legacy chunked data
+                new_images.append(reassemble_base64_string(img))
+            else:
+                # URL (migrated or new)
+                new_images.append(get_image_url(img))
+        house["house_image"] = new_images
+        data.append(house)
+    
+    return JSONResponse({"message":"House data","data":data,"status":status.HTTP_200_OK})
 
 
 @router.get("/get-selected-house-by-id/{house_id}")
 async def get_selected_house_by_id(house_id:str):
     house_data = house_collection.find_one({"_id": house_id})
     if not house_data or "house_image" not in house_data:
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="House not found")
         
-    # Reassemble chunked data for the first image
     image_list = house_data["house_image"]
     if not isinstance(image_list, list) or len(image_list) == 0:
-        raise HTTPException(status_code=404, detail="Image list is empty or incorrect format")
+        raise HTTPException(status_code=404, detail="Image list is empty")
 
     first_image_item = image_list[0]
+    
+    # If it's already a URL, we can redirect or just return the URL logic
+    # But for backward compatibility with older app versions that use this as an <img> src:
+    if isinstance(first_image_item, str) and not first_image_item.startswith("data:"):
+        # It's a file path, return a redirect to the static file
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=get_image_url(first_image_item))
+
+    # Fallback for legacy base64/base85 (same logic as before)
     if isinstance(first_image_item, list):
         image_string = "".join(first_image_item)
     else:
         image_string = first_image_item
 
-    # Robust decoding: check if it's a Data URI (Base64) or Base85
     try:
         if image_string.startswith("data:image"):
-            # It's an old Data URI (Base64)
-            logger.info(f"Detected Data URI (Base64) for {house_id}")
             base64_data = image_string.split(",", 1)[1]
             image_bytes = base64.b64decode(base64_data)
             media_type = image_string.split(":", 1)[1].split(";", 1)[0]
         else:
-            # Try Base85 first (the new standard)
             try:
                 image_bytes = base64.b85decode(image_string)
-                media_type = "image/webp"  # Our standard via utill.py
+                media_type = "image/webp"
             except ValueError:
-                # If Base85 fails, try Base64 (fallback for legacy non-prefixed data)
-                logger.info(f"Base85 decode failed for {house_id}, trying Base64 fallback")
                 image_bytes = base64.b64decode(image_string)
-                media_type = "image/jpeg" # Default fallback
+                media_type = "image/jpeg"
     except Exception as e:
-        logger.error(f"Error decoding image data for {house_id}: {e}")
+        logger.error(f"Error decoding legacy image data for {house_id}: {e}")
         raise HTTPException(status_code=500, detail="Error processing image data")
 
     return Response(content=image_bytes, media_type=media_type)
+
 
 
 
@@ -543,10 +570,14 @@ async def get_selected_house_details(house_id:str,data: dict = Depends(get_token
         if not house_data:
             raise HTTPException(status_code=404, detail="House not found")
         new_image_data=[]
-        for i in house_data["house_image"]:
-            y=reassemble_base64_string(i)
-            new_image_data.append(y)
+        for i in house_data.get("house_image", []):
+            if isinstance(i, list):
+                y=reassemble_base64_string(i)
+                new_image_data.append(y)
+            else:
+                new_image_data.append(get_image_url(i))
         house_data["house_image"]=new_image_data
+
         # house_data.pop("_id")
         return JSONResponse({"message":"House details","data":house_data["house_image"],"wallet":user_data["wallet_balance"],"status":status.HTTP_200_OK})
     
@@ -579,7 +610,7 @@ async def delete_account(data: dict = Depends(get_token)):
             )
 
         # get user id from token
-        user_id = data["id"]
+        user_id = data.get("id")
 
         if not user_id:
             return JSONResponse(
@@ -588,25 +619,36 @@ async def delete_account(data: dict = Depends(get_token)):
             )
 
         # delete user
-        user_collection.delete_one({"_id": user_id})
+        result = user_collection.delete_one({"_id": str(user_id)})
+        
+        if result.deleted_count == 0:
+            logger.warning(f"Delete failed: User {user_id} not found in database.")
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"message": "User not found"},
+            )
+
         logger.info(f"User {user_id} deleted successfully")
 
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "message": "user deleted",
+                "status": 200
             },
         )
+
 
     except Exception as e:
         logger.error(f"Error in /delete-account: {e}")
 
         return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
-                "message": "token expired or invalid",
+                "message": f"Server error: {str(e)}",
             },
         )
+
 
 
 
@@ -856,17 +898,6 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
         logger.error(f"Error in topup_jard_kidz_plan: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
 
-@router.post("/delete-account")
-async def delete_account(data: dict = Depends(get_token)):
-    user_id = data["id"]
-    try:
-        # Delete user from Astra DB
-        user_collection.delete_one({"_id": user_id})
-        logger.info(f"User {user_id} deleted their account.")
-        return JSONResponse({"message": "Account deleted successfully", "status": 200})
-    except Exception as e:
-        logger.error(f"Error deleting account {user_id}: {e}")
-        return JSONResponse({"message": f"Error deleting account: {str(e)}", "status": 500})
 
 @router.post("/upload-profile-pic")
 async def upload_profile_pic(file: UploadFile = File(...), data: dict = Depends(get_token)):

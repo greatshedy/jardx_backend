@@ -24,6 +24,20 @@ load_dotenv(os.path.join(current_dir, ".env"))
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "fallback_secret_keep_this_secure")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://10.12.228.168:8000")
+
+def get_image_url(image_path: str) -> str:
+    """
+    Converts a relative image path (/uploads/...) to a full URL.
+    If the input is already a URL or base64, returns it as is.
+    """
+    if not image_path:
+        return ""
+    if image_path.startswith("http") or image_path.startswith("data:"):
+        return image_path
+    
+    return f"{BACKEND_BASE_URL.rstrip('/')}/{image_path.lstrip('/')}"
+
 
 def generate_otp(length=4):
     otp = ''.join([str(random.randint(0, 9)) for _ in range(length)])
@@ -279,6 +293,8 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
     body = MIMEMultipart("alternative")
     message.attach(body)
 
+    is_url = image_data.startswith("http")
+    
     # HTML email with inline CSS
     html_content = f"""
     <html>
@@ -308,9 +324,10 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
     """
                 
     if image_data:
-        html_content += """
+        img_src = "cid:house_image" if not is_url else image_data
+        html_content += f"""
                 <div class="img-container">
-                    <img src="cid:house_image" alt="Property Image" />
+                    <img src="{img_src}" alt="Property Image" />
                 </div>
         """
         
@@ -324,7 +341,7 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
     
     body.attach(MIMEText(html_content, "html"))
 
-    if image_data:
+    if image_data and not is_url:
         try:
             if image_data.startswith("data:image"):
                 base64_data = image_data.split(",", 1)[1]
@@ -339,6 +356,7 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
             msg_image.add_header('Content-ID', '<house_image>')
             msg_image.add_header('Content-Disposition', 'inline')
             message.attach(msg_image)
+
         except Exception as e:
             print("Could not attach image to email:", e)
 
@@ -538,9 +556,11 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
             )
             print(f"DEBUG: Referral activated for {user_id} with {percentage}%")
 
-    # 2. Handle Bonus for the Referrer (Every time the referred user deposits)
+    # 2. Handle Bonus for the Referrer (Only on the FIRST deposit)
     referrer_id = user.get("referred_by")
-    if referrer_id:
+    bonus_already_paid = user.get("referral_bonus_paid", False)
+    
+    if referrer_id and not bonus_already_paid:
         # Resolve referrer
         referrer = user_collection.find_one({"_id": referrer_id})
         if referrer and referrer.get("is_referral_active"):
@@ -567,3 +587,9 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
                     "created_at": datetime.utcnow().isoformat()
                 })
                 print(f"DEBUG: Referral bonus of {bonus_amount} ({ref_percentage}%) credited to {referrer_id}")
+                
+                # 3. Mark the bonus as paid so it doesn't trigger on subsequent deposits
+                user_collection.update_one(
+                    {"_id": uid_str}, 
+                    {"$set": {"referral_bonus_paid": True}}
+                )

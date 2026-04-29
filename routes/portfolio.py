@@ -53,8 +53,10 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "months_paid": 0,
                 "next_payment_date": "",
                 "status": "Completed",
+                "house_image": house.get("house_image", [])[0] if house.get("house_image") else "",
                 "created_at": datetime.datetime.utcnow().isoformat()
             }
+
         
         else:
             # Installment Handling
@@ -89,8 +91,10 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "months_paid": 0,  # 0 months paid because this is just downpayment
                 "next_payment_date": next_payment_date,
                 "status": "Active",
+                "house_image": house.get("house_image", [])[0] if house.get("house_image") else "",
                 "created_at": datetime.datetime.utcnow().isoformat()
             }
+
 
         # Deduct wallet balance
         new_balance = current_balance - purchase.amount_to_pay
@@ -105,7 +109,14 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
             first_img_item = house["house_image"][0]
             house_image = reassemble_base64_string(first_img_item) if isinstance(first_img_item, list) else first_img_item
 
-        # Record Transaction for History
+        # Record Transaction for History (Using URL instead of heavy base64)
+        first_house_img = ""
+        if house.get("house_image") and len(house["house_image"]) > 0:
+            raw_img = house["house_image"][0]
+            # If it's a URL (string) we store it; if it's legacy chunked data (list), we skip it
+            if isinstance(raw_img, str):
+                first_house_img = get_image_url(raw_img)
+
         transactions_collection.insert_one({
             "tx_ref": f"BUY-{secrets.token_hex(6).upper()}",
             "user_id": user_id,
@@ -114,21 +125,27 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
             "type": "DEBIT",
             "purpose": f"Purchase: {house['house_name']}",
             "unit_sqm": house_plan.get("unitSqm", "N/A"),
-            "house_image": house_image,
+            "house_image": first_house_img, 
             "status": "SUCCESS",
             "created_at": datetime.datetime.utcnow().isoformat()
         })
+
         
         logger.info(f"Purchase completed: user={user_id}, house={house['house_name']}, plan={purchase.plan_type}")
 
+
         # Send Email
         image_to_send = ""
-        if isinstance(house.get("house_image"), list) and len(house["house_image"]) > 0:
+        if house.get("house_image") and len(house["house_image"]) > 0:
             first_img = house["house_image"][0]
             if isinstance(first_img, list):
+                # Legacy base64 chunks
                 image_to_send = "".join(first_img)
             else:
-                image_to_send = first_img
+                # URL path - convert to full absolute URL for email
+                from utill import get_image_url
+                image_to_send = get_image_url(first_img)
+
 
         background_tasks.add_task(
             send_purchase_email,
@@ -158,12 +175,28 @@ def get_portfolio(data: dict = Depends(get_token)):
             return JSONResponse(status_code=401, content={"message": "Invalid user"})
         
         portfolio_data = list(portfolio_collection.find({"user_id": user_id}))
-        
-        # Convert ObjectIds to strings
+        from utill import get_image_url
+        # Convert ObjectIds to strings and resolve images
         for item in portfolio_data:
             item["_id"] = str(item["_id"])
             
+            # If house_image is missing or legacy, try to fetch current URL from house collection
+            h_img = item.get("house_image")
+            if not h_img or isinstance(h_img, list):
+                h = house_collection.find_one({"_id": item.get("house_id")})
+                if h and h.get("house_image") and len(h["house_image"]) > 0:
+                    first_img = h["house_image"][0]
+                    if isinstance(first_img, str) and not first_img.startswith("data:"):
+                        item["house_image"] = get_image_url(first_img)
+                    else:
+                        item["house_image"] = ""
+                else:
+                    item["house_image"] = ""
+            elif isinstance(h_img, str) and not h_img.startswith("data:"):
+                item["house_image"] = get_image_url(h_img)
+            
         return JSONResponse(status_code=200, content={"message": "Success", "data": portfolio_data})
+
 
     except Exception as e:
         logger.error(f"Portfolio Fetch Error: {e}")

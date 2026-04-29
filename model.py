@@ -12,6 +12,7 @@ class User(BaseModel):
     referred_by: str = ""
     is_referral_active: bool = False
     referral_percentage: float = 0.0
+    referral_bonus_paid: bool = False
 
 
 class Login(BaseModel):

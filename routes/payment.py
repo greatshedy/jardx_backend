@@ -228,11 +228,24 @@ async def get_payment_history(month: int = None, year: int = None, data: dict = 
         transactions = list(transactions_collection.find(query).sort({"created_at": -1}))
         
         # Convert ObjectIds and prepare response
+        now = datetime.datetime.utcnow()
         for tx in transactions:
             tx["_id"] = str(tx["_id"])
             
             # Normalize status for UI
             db_status = tx.get("status", "PENDING").upper()
+            
+            # 🕰️ If it's still PENDING but more than 1 hour old, treat it as FAILED/EXPIRED in UI
+            if db_status == "PENDING":
+                created_at = tx.get("created_at")
+                if created_at:
+                    try:
+                        tx_time = datetime.datetime.fromisoformat(created_at)
+                        if (now - tx_time).total_seconds() > 3600: # 1 hour
+                            db_status = "FAILED"
+                    except Exception:
+                        pass
+
             if db_status == "SUCCESS":
                 tx["status"] = "SUCCESSFUL"
             elif db_status == "FAILED":
@@ -248,6 +261,7 @@ async def get_payment_history(month: int = None, year: int = None, data: dict = 
                 tx["purpose"] = f"Wallet Funding ({tx.get('gateway', 'Unknown')})"
         
         return {"status": "success", "data": transactions}
+
         
     except Exception as e:
         logger.error(f"Error fetching history: {str(e)}")
@@ -285,10 +299,50 @@ async def payment_callback(
     if not is_successful and not is_failed and ref:
         transaction = transactions_collection.find_one({"tx_ref": ref})
         if transaction:
+            # 🕵️ If still PENDING in DB, let's try an ACTIVE VERIFICATION right now
+            # This handles cases where the webhook is slow or failed to reach us
+            if transaction["status"] == "PENDING":
+                try:
+                    logger.info(f"Callback: Active verification for {ref}...")
+                    # We can't use 'Depends(get_token)' here as it's a GET browser redirect
+                    # But we have the user_id in the transaction record.
+                    # We simulate a verify_transaction logic here
+                    gateway = PaymentGatewayFactory.get_gateway(transaction["gateway"])
+                    v_res = await gateway.verify_transaction(ref)
+                    
+                    gateway_ok = False
+                    if transaction["gateway"] == "Monnify":
+                        gateway_ok = (v_res.get("responseBody") or {}).get("paymentStatus") == "PAID"
+                    elif transaction["gateway"] == "Flutterwave":
+                        gateway_ok = v_res.get("status") == "success" and (v_res.get("data") or {}).get("status") == "successful"
+                    
+                    if gateway_ok:
+                        # Success! Credit the user.
+                        # (Note: we should use an atomic update or check if already credited)
+                        # Re-fetching to be safe
+                        tx_latest = transactions_collection.find_one({"tx_ref": ref})
+                        if tx_latest["status"] == "PENDING":
+                            transactions_collection.update_one(
+                                {"tx_ref": ref},
+                                {"$set": {"status": "SUCCESS", "completed_at": datetime.datetime.utcnow().isoformat()}}
+                            )
+                            user_id = tx_latest["user_id"]
+                            user = user_collection.find_one({"_id": user_id})
+                            new_bal = float(user.get("wallet_balance", 0)) + float(tx_latest["amount"])
+                            user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_bal}})
+                            process_referral_logic(user_id, float(tx_latest["amount"]), user_collection, transactions_collection)
+                            is_successful = True
+                            logger.info(f"Callback: Successfully active-verified and credited {ref}")
+                except Exception as e:
+                    logger.error(f"Callback Verification failed for {ref}: {e}")
+
+            # Re-check status after active verification attempt
+            transaction = transactions_collection.find_one({"tx_ref": ref})
             if transaction["status"] == "SUCCESS":
                 is_successful = True
             elif transaction["status"] == "FAILED":
                 is_failed = True
+
 
     # Determine dynamic UI elements
     if is_successful:

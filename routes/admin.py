@@ -1,46 +1,99 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile, Form
 from model import House, JardKidzPlan
 from db.database import house_collection, jard_kidz_collection, user_collection
 from fastapi.responses import JSONResponse
 from starlette import status
-from utill import chunk_base64_string,reassemble_base64_string
+from utill import chunk_base64_string,reassemble_base64_string, get_image_url
+
 import logging
+import os
+import secrets
+import json
+
 
 logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/admin", tags=["Admin"]) 
 
-@router.post("/add-house")
-async def add_house(house_data:House):
-    data=dict(house_data)
-    logger.debug(f"Adding house: {data.get('house_name')}")
-    new_chunked_data=[]
-    for i in data["house_image"]:
-        chunked_data=chunk_base64_string(i)
-        new_chunked_data.append(chunked_data)
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads", "houses")
 
-    data["house_image"]=new_chunked_data
-    logger.info(f"House data processed for: {data.get('house_name')}")
-    house_collection.insert_one(data)   
-    return JSONResponse({"message":"House added successfully","status":status.HTTP_200_OK})
+def save_house_image(file: UploadFile):
+    # Check file size (200KB = 200 * 1024 bytes)
+    file.file.seek(0, os.SEEK_END)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    
+    if file_size > 200 * 1024:
+        return None, "File size exceeds 200KB limit."
+    
+    # Generate unique filename
+    filename = f"{secrets.token_hex(8)}{os.path.splitext(file.filename)[1] or '.jpg'}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as buffer:
+        buffer.write(file.file.read())
+    
+    return f"/uploads/houses/{filename}", None
+
+@router.post("/add-house")
+async def add_house(
+    house_name: str = Form(...),
+    house_about: str = Form(...),
+    house_location: str = Form(...),
+    house_status: str = Form(...),
+    house_pricing_plan: str = Form(...), # JSON string
+    house_landmarks: str = Form("[]"), # JSON string
+    house_benefits: str = Form("[]"), # JSON string
+    images: list[UploadFile] = File(...)
+):
+    try:
+        new_image_urls = []
+        for img in images:
+            url, error = save_house_image(img)
+            if error:
+                return JSONResponse({"message": error, "status": 400})
+            new_image_urls.append(url)
+
+        data = {
+            "house_name": house_name,
+            "house_about": house_about,
+            "house_location": house_location,
+            "house_status": house_status,
+            "house_pricing_plan": json.loads(house_pricing_plan),
+            "house_landmarks": json.loads(house_landmarks),
+            "house_benefits": json.loads(house_benefits),
+            "house_image": new_image_urls
+        }
+        
+        logger.info(f"Adding house: {house_name}")
+        house_collection.insert_one(data)   
+        return JSONResponse({"message": "House added successfully", "status": status.HTTP_200_OK})
+    except Exception as e:
+        logger.error(f"Error adding house: {e}")
+        return JSONResponse({"message": f"Error adding house: {str(e)}", "status": 500})
+
 
 
 @router.get("/get-house",response_model=list[House])
 async def get_house():
-    all_house_data=house_collection.find({},projection={"house_image":0}).to_list()
-    data=all_house_data
-    new_image_collection=[]
-    # for i in all_house_data:
-    #     del i["house_image"]
-    #     data.append(i)
-        # for j in i["house_image"]:
-        #     reassembled_data=reassemble_base64_string(j)
-        #     new_image_collection.append(reassembled_data)
-        # i["house_image"]=new_image_collection
-        # data.append(i)
+    all_house_data=list(house_collection.find({}))
+    data = []
+    for house in all_house_data:
+        house["_id"] = str(house["_id"])
+        new_images = []
+        for img in house.get("house_image", []):
+            if isinstance(img, list):
+                # Still legacy chunked data
+                new_images.append(reassemble_base64_string(img))
+            else:
+                # URL (migrated or new)
+                new_images.append(get_image_url(img))
+        house["house_image"] = new_images
+        data.append(house)
     
     logger.info("House list fetched")
     return JSONResponse({"message":"House data","data":data,"status":status.HTTP_200_OK})
+
 
 
 
@@ -58,28 +111,80 @@ async def update_house_status(house_id:str,data:dict):
 
 
 @router.put("/update-house/{house_id}")
-async def update_house(house_id:str,house_data:House):
-    new_chunked_data=[]
-    house_data=dict(house_data)
-    for i in house_data["house_image"]:
-        chunked_data=chunk_base64_string(i)
-        new_chunked_data.append(chunked_data)
+async def update_house(
+    house_id: str,
+    house_name: str = Form(None),
+    house_about: str = Form(None),
+    house_location: str = Form(None),
+    house_status: str = Form(None),
+    house_pricing_plan: str = Form(None),
+    house_landmarks: str = Form(None),
+    house_benefits: str = Form(None),
+    existing_images: str = Form("[]"), # JSON string of existing URLs to keep
+    images: list[UploadFile] = File(None)
+):
+    try:
+        update_data = {}
+        if house_name: update_data["house_name"] = house_name
+        if house_about: update_data["house_about"] = house_about
+        if house_location: update_data["house_location"] = house_location
+        if house_status: update_data["house_status"] = house_status
+        if house_pricing_plan: update_data["house_pricing_plan"] = json.loads(house_pricing_plan)
+        if house_landmarks: update_data["house_landmarks"] = json.loads(house_landmarks)
+        if house_benefits: update_data["house_benefits"] = json.loads(house_benefits)
 
-    house_data["house_image"]=new_chunked_data
-    house_collection.update_one({"_id":house_id},{"$set":dict(house_data)})
-    return JSONResponse({"message":"House updated successfully","status":status.HTTP_200_OK})
+        # Handle images
+        final_images = json.loads(existing_images)
+        
+        # Strip domain from existing images if present
+        cleaned_existing = []
+        for img in final_images:
+            if "/uploads/" in img:
+                rel_path = img.split("/uploads/")[1]
+                cleaned_existing.append(f"/uploads/{rel_path}")
+            else:
+                cleaned_existing.append(img)
+        final_images = cleaned_existing
+
+        if images:
+            for img in images:
+                url, error = save_house_image(img)
+                if error:
+                    return JSONResponse({"message": error, "status": 400})
+                final_images.append(url)
+        
+        if final_images or images: # Only update if images were touched
+            update_data["house_image"] = final_images
+
+        house_collection.update_one({"_id": house_id}, {"$set": update_data})
+
+        logger.info(f"House updated: {house_id}")
+        return JSONResponse({"message": "House updated successfully", "status": status.HTTP_200_OK})
+    except Exception as e:
+        logger.error(f"Error updating house {house_id}: {e}")
+        return JSONResponse({"message": f"Error updating house: {str(e)}", "status": 500})
 
 
-@router.put("/get-selected-house-by-id/{house_id}")
+
+@router.get("/get-selected-house-by-id/{house_id}")
 async def get_selected_house_by_id(house_id:str):
     house_data=house_collection.find_one({"_id":house_id})
+    if not house_data:
+        return JSONResponse({"message": "House not found", "status": 404})
+        
     new_image_collection=[]
-    for i in house_data["house_image"]:
-        reassembled_data=reassemble_base64_string(i)
-        new_image_collection.append(reassembled_data)
+    for i in house_data.get("house_image", []):
+        if isinstance(i, list):
+            reassembled_data=reassemble_base64_string(i)
+            new_image_collection.append(reassembled_data)
+        else:
+            new_image_collection.append(get_image_url(i))
+            
     house_data["house_image"]=new_image_collection
+    house_data["_id"] = str(house_data["_id"])
     logger.info(f"Selected house fetched: {house_id}")
     return JSONResponse({"message":"House data","data":house_data,"status":status.HTTP_200_OK})
+
 
 
 @router.get("/get-child-investments")

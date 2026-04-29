@@ -41,10 +41,12 @@ async def root():
 # Mount static files
 app.mount("/static", StaticFiles(directory=os.path.join(current_dir, "static")), name="static")
 
-# Ensure uploads directory exists for profile pictures
+# Ensure uploads directory exists for profile pictures and houses
 UPLOAD_DIR = os.path.join(current_dir, "uploads")
 os.makedirs(os.path.join(UPLOAD_DIR, "profiles"), exist_ok=True)
+os.makedirs(os.path.join(UPLOAD_DIR, "houses"), exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
 
 # Templates
 templates = Jinja2Templates(directory=os.path.join(current_dir, "templates"))

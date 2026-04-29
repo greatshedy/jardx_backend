@@ -8,11 +8,18 @@ class FlutterwaveGateway(BasePaymentGateway):
         self.base_url = "https://api.flutterwave.com/v3"
 
     async def initialize_payment(self, amount: float, user_email: str, reference: str, **kwargs):
+        # Route through backend bridge for active verification
+        from urllib.parse import quote
+        custom_scheme_url = kwargs.get("redirect_url") or "jardx://addmoneysuccess"
+        backend_base = os.getenv("BACKEND_BASE_URL", "https://jardx-backend.onrender.com")
+        redirect_url = f"{backend_base}/users/payment/callback?redirect_url={quote(custom_scheme_url)}"
+
         payload = {
             "tx_ref": reference,
             "amount": amount,
             "currency": "NGN",
-            "redirect_url": kwargs.get("redirect_url", "jardx://addmoneysuccess"),
+            "redirect_url": redirect_url,
+
             "customer": {
                 "email": user_email,
                 "name": kwargs.get("user_name", "JardX User")
