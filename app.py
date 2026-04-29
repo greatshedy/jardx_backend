@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 import os
 from routes import users, admin, payment, finance
 from routes import portfolio
+import threading
+import time
+import requests
 
 
 
@@ -56,4 +59,53 @@ app.include_router(admin.router)
 app.include_router(payment.router)
 app.include_router(finance.router)
 
+
 app.include_router(portfolio.router)
+
+# --- Keep-Alive & Health Check Logic ---
+
+@app.get("/health")
+async def health_check():
+    """
+    Endpoint for Render/UptimeRobot to check if the app and DB are alive.
+    """
+    try:
+        # Import inside to avoid circular dependency if any, 
+        # though not an issue with current structure.
+        from db.database import user_collection
+        # Simple query to verify Astra DB connectivity
+        user_collection.find_one({})
+        return {"status": "healthy", "database": "connected", "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {"status": "unhealthy", "database": str(e)}
+
+def keep_alive_loop():
+    """
+    Background loop to ping the server and prevent hibernation.
+    """
+    # Wait a bit for the server to fully start
+    time.sleep(10)
+    
+    url = os.getenv("BACKEND_BASE_URL")
+    if not url or "10.12.228" in url or "localhost" in url:
+        logger.info("Keep-alive: Skipping (Local environment detected or URL not set)")
+        return
+
+    logger.info(f"Keep-alive: Starting loop for {url}")
+    while True:
+        try:
+            # Ping the health endpoint
+            target = f"{url.rstrip('/')}/health"
+            response = requests.get(target, timeout=15)
+            logger.info(f"Keep-alive ping to {target}: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Keep-alive ping failed: {e}")
+        
+        # Ping every 10 minutes (Render hibernates after 15 mins of inactivity)
+        time.sleep(600)
+
+@app.on_event("startup")
+async def startup_event():
+    # Run the keep-alive loop in a separate background thread
+    threading.Thread(target=keep_alive_loop, daemon=True).start()
