@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, UploadFile, Form
 from model import House, JardKidzPlan
-from db.database import house_collection, jard_kidz_collection, user_collection
+from db.database import house_collection, jard_kidz_collection, user_collection, transactions_collection
 from fastapi.responses import JSONResponse
 from starlette import status
 from utill import chunk_base64_string,reassemble_base64_string, get_image_url
@@ -258,4 +258,107 @@ async def delete_user(user_id: str):
         return JSONResponse({"message": "User deleted successfully", "status": 200})
     except Exception as e:
         logger.error(f"Error deleting user {user_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+# --- TRANSACTION MANAGEMENT ENDPOINTS ---
+
+@router.get("/transactions")
+async def get_all_transactions():
+    try:
+        all_tx = list(transactions_collection.find({}).sort({"created_at": -1}))
+        
+        # Clean IDs for JSON
+        for tx in all_tx:
+            tx["_id"] = str(tx["_id"])
+            
+            # Fetch user info if needed for the admin view
+            user = user_collection.find_one({"_id": tx["user_id"]}, projection={"user_name": 1, "email": 1})
+            if user:
+                tx["user_info"] = {
+                    "name": user.get("user_name"),
+                    "email": user.get("email")
+                }
+            
+        logger.info(f"Admin fetched {len(all_tx)} transactions")
+        return JSONResponse({"message": "Transactions fetched successfully", "data": all_tx, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching transactions: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/approve-transaction/{tx_ref}")
+async def approve_transaction(tx_ref: str):
+    try:
+        # 1. Find transaction
+        transaction = transactions_collection.find_one({"tx_ref": tx_ref})
+        if not transaction:
+            return JSONResponse({"message": "Transaction not found", "status": 404})
+        
+        if transaction["status"] == "SUCCESS":
+            return JSONResponse({"message": "Transaction already approved", "status": 400})
+
+        # 2. Update status
+        transactions_collection.update_one(
+            {"tx_ref": tx_ref},
+            {"$set": {"status": "SUCCESS", "completed_at": secrets.token_hex(4)}} # placeholder for timestamp
+        )
+        # Using real timestamp
+        import datetime
+        transactions_collection.update_one(
+            {"tx_ref": tx_ref},
+            {"$set": {"completed_at": datetime.datetime.utcnow().isoformat()}}
+        )
+
+        # 3. Credit user wallet
+        user_id = transaction["user_id"]
+        amount = float(transaction["amount"])
+        
+        user = user_collection.find_one({"_id": user_id})
+        if user:
+            new_balance = float(user.get("wallet_balance", 0)) + amount
+            user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+            
+            # 4. Trigger referral logic if applicable
+            from utill import process_referral_logic
+            process_referral_logic(user_id, amount, user_collection, transactions_collection)
+            
+            logger.info(f"Admin APPROVED transaction {tx_ref} | Credited {amount} to {user_id}")
+            return JSONResponse({"message": "Transaction approved and wallet credited", "status": 200})
+        else:
+            return JSONResponse({"message": "User not found", "status": 404})
+
+    except Exception as e:
+        logger.error(f"Error approving transaction {tx_ref}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/reject-transaction/{tx_ref}")
+async def reject_transaction(tx_ref: str):
+    try:
+        transaction = transactions_collection.find_one({"tx_ref": tx_ref})
+        if not transaction:
+            return JSONResponse({"message": "Transaction not found", "status": 404})
+        
+        import datetime
+        transactions_collection.update_one(
+            {"tx_ref": tx_ref},
+            {"$set": {
+                "status": "FAILED", 
+                "completed_at": datetime.datetime.utcnow().isoformat(),
+                "admin_note": "Rejected by administrator"
+            }}
+        )
+        
+        logger.info(f"Admin REJECTED transaction {tx_ref}")
+        return JSONResponse({"message": "Transaction rejected", "status": 200})
+    except Exception as e:
+        logger.error(f"Error rejecting transaction {tx_ref}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.delete("/delete-transaction/{tx_ref}")
+async def delete_transaction(tx_ref: str):
+    try:
+        transactions_collection.delete_one({"tx_ref": tx_ref})
+        logger.info(f"Admin DELETED transaction {tx_ref}")
+        return JSONResponse({"message": "Transaction deleted successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error deleting transaction {tx_ref}: {e}")
         return JSONResponse({"message": str(e), "status": 500})

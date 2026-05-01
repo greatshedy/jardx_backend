@@ -134,15 +134,23 @@ async def get_all_transactions(page: int = 1, page_size: int = 15):
         )
         all_transactions = list(cursor)
         
-        users_cursor = user_collection.find({}, projection={"user_name": 1})
-        users_map = {str(u['_id']): u.get('user_name', 'Unknown User') for u in users_cursor}
+        users_cursor = user_collection.find({}, projection={"user_name": 1, "email": 1})
+        users_map = {str(u['_id']): {"name": u.get('user_name', 'Unknown User'), "email": u.get('email', '')} for u in users_cursor}
         
         enriched_transactions = []
         for tx in all_transactions:
             tx_clean = serialize_astra_data(tx)
             tx_clean['_id'] = str(tx_clean['_id'])
             user_id = str(tx_clean.get('user_id'))
-            tx_clean['user_name'] = users_map.get(user_id, 'Unknown User')
+            user_info = users_map.get(user_id, {"name": "Unknown User", "email": ""})
+            tx_clean['user_name'] = user_info["name"]
+            tx_clean['user_email'] = user_info["email"]
+            
+            # Ensure proof_url is absolute for the admin dashboard
+            if tx_clean.get("proof_url") and not tx_clean["proof_url"].startswith("http"):
+                from utill import get_image_url
+                tx_clean["proof_url"] = get_image_url(tx_clean["proof_url"])
+                
             enriched_transactions.append(tx_clean)
 
         logger.info(f"Fetched transactions page {page}")
@@ -182,22 +190,38 @@ async def approve_transaction(tx_ref: str, background_tasks: BackgroundTasks):
         user_id = transaction["user_id"]
         user = user_collection.find_one({"_id": user_id})
         if user:
-            new_balance = float(user.get("wallet_balance", 0)) + float(transaction["amount"])
+            amount = float(transaction["amount"])
+            new_balance = float(user.get("wallet_balance", 0)) + amount
             user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
             logger.info(f"Manual Approval: Wallet Credited for {user_id}. Ref: {tx_ref}")
+
+            # Referral Logic
+            from utill import process_referral_logic
+            process_referral_logic(user_id, amount, user_collection, transactions_collection)
 
             # Send Email
             background_tasks.add_task(
                 send_wallet_credit_email,
                 user.get("email"),
                 user.get("user_name", "User"),
-                float(transaction["amount"]),
+                amount,
                 new_balance
             )
 
         return JSONResponse({"message": "Transaction approved and wallet credited", "status": 200})
     except Exception as e:
         logger.error(f"Error approving transaction {tx_ref}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.delete("/delete-transaction/{tx_ref}")
+async def delete_transaction(tx_ref: str):
+    try:
+        transactions_collection.delete_one({"tx_ref": tx_ref})
+        logger.info(f"Admin DELETED transaction {tx_ref}")
+        return JSONResponse({"message": "Transaction deleted successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error deleting transaction {tx_ref}: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
 

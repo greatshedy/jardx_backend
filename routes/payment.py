@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, File, UploadFile, Form
 from db.database import user_collection, transactions_collection
 from utill import get_token, process_referral_logic
 from utils.payment_gateways.factory import PaymentGatewayFactory
@@ -405,4 +405,53 @@ async def payment_callback(
     </html>
     """
     return HTMLResponse(content=html_content)
+
+@router.post("/manual-transfer")
+async def manual_transfer(
+    amount: float = Form(...),
+    proof: UploadFile = File(...),
+    data: dict = Depends(get_token)
+):
+    user_id = data.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    try:
+        # 1. Define storage path
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        timestamp = int(datetime.datetime.utcnow().timestamp())
+        filename = f"manual_{user_id}_{timestamp}.jpg"
+        filepath = os.path.join(base_dir, "uploads", "manual_payments", filename)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # 2. Save the proof file
+        contents = await proof.read()
+        with open(filepath, "wb") as f:
+            f.write(contents)
+            
+        # 3. Create transaction record
+        tx_ref = f"MANUAL-{secrets.token_hex(6).upper()}"
+        proof_url = f"/uploads/manual_payments/{filename}"
+        
+        transactions_collection.insert_one({
+            "tx_ref": tx_ref,
+            "user_id": user_id,
+            "amount": float(amount),
+            "gateway": "Manual Bank Transfer",
+            "type": "CREDIT",
+            "purpose": "Bank Transfer (Manual Verification)",
+            "status": "PENDING",
+            "is_manual": True,
+            "proof_url": proof_url,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+        
+        return {"status": "success", "message": "Transfer notification sent. It will be verified within 24-48 hours."}
+
+    except Exception as e:
+        logger.error(f"Manual Transfer Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
