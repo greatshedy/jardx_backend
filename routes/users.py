@@ -925,4 +925,71 @@ async def upload_profile_pic(file: UploadFile = File(...), data: dict = Depends(
         return JSONResponse({"message": "Profile picture updated", "status": 200, "url": pic_url})
     except Exception as e:
         logger.error(f"Upload Error: {e}")
-        return JSONResponse({"message": f"Upload failed: {str(e)}", "status": 500})
+        return JSONResponse({"message": f"Upload failed: {str(e)}", "status": 500})
+
+
+# Bank Account Management
+@router.get("/get-bank-accounts")
+async def get_bank_accounts(data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404})
+        
+        bank_accounts = user.get("bank_accounts", [])
+        return JSONResponse({"data": bank_accounts, "status": 200})
+    except Exception as e:
+        logger.error(f"Error in get_bank_accounts: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/add-bank-account")
+async def add_bank_account(bank: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        # Generate a simple unique ID for the bank entry if not present
+        if "id" not in bank:
+            bank["id"] = secrets.token_hex(4)
+            
+        user_collection.update_one(
+            {"_id": user_id},
+            {"$push": {"bank_accounts": bank}}
+        )
+        return JSONResponse({"message": "Bank account linked successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in add_bank_account: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.delete("/delete-bank-account/{bank_id}")
+async def delete_bank_account(bank_id: str, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user_collection.update_one(
+            {"_id": user_id},
+            {"$pull": {"bank_accounts": {"id": bank_id}}}
+        )
+        return JSONResponse({"message": "Bank account removed successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in delete_bank_account: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.put("/update-bank-account/{bank_id}")
+async def update_bank_account(bank_id: str, updated_bank: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        # Remove the bank with this ID and push the updated one
+        # In MongoDB/AstraDB JSON, we can use positional operator or pull/push
+        user_collection.update_one(
+            {"_id": user_id},
+            {"$pull": {"bank_accounts": {"id": bank_id}}}
+        )
+        # Ensure ID stays the same
+        updated_bank["id"] = bank_id
+        user_collection.update_one(
+            {"_id": user_id},
+            {"$push": {"bank_accounts": updated_bank}}
+        )
+        return JSONResponse({"message": "Bank account updated successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in update_bank_account: {e}")
+        return JSONResponse({"message": str(e), "status": 500})

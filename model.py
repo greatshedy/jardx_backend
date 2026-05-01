@@ -1,5 +1,13 @@
 from pydantic import BaseModel,EmailStr
 
+class BankAccount(BaseModel):
+    id: str = ""
+    bank_name: str
+    account_number: str
+    account_name: str
+    account_type: str
+    bank_slug: str = ""
+
 class User(BaseModel):
     user_name:str=""
     wallet_balance:float=0.0
@@ -13,6 +21,7 @@ class User(BaseModel):
     is_referral_active: bool = False
     referral_percentage: float = 0.0
     referral_bonus_paid: bool = False
+    bank_accounts: list[BankAccount] = []
 
 
 class Login(BaseModel):
