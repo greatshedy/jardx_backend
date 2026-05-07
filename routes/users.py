@@ -73,7 +73,50 @@ async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token
         
     except Exception as e:
         logger.error(f"Error in /vendor-register: {e}")
-        return JSONResponse({"message": str(e), "status": 500})
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.get("/vendor-details")
+async def get_vendor_details(data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        vendor_data = vendors_collection.find_one({"user_id": user_id})
+        
+        if not vendor_data:
+            return JSONResponse({"message": "Vendor record not found", "status": 404}, status_code=404)
+            
+        # Convert _id to string
+        vendor_data["_id"] = str(vendor_data["_id"])
+        
+        return JSONResponse({"status": 200, "data": vendor_data}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /vendor-details: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/update-vendor-photo")
+async def update_vendor_photo(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        photo_base64 = payload.get("photo")
+        
+        if not photo_base64:
+            return JSONResponse({"message": "No photo data provided", "status": 400}, status_code=400)
+            
+        # Upload to Cloudinary
+        photo_url = upload_to_cloudinary(photo_base64, f"vendors/photos/{user_id}")
+        
+        if not photo_url:
+            return JSONResponse({"message": "Upload failed", "status": 500}, status_code=500)
+            
+        # Update database
+        vendors_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"photo": photo_url}}
+        )
+        
+        return JSONResponse({"message": "Photo updated successfully", "url": photo_url, "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /update-vendor-photo: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
 from fastapi.templating import Jinja2Templates
 
