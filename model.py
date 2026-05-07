@@ -88,3 +88,14 @@ class ResetPassword(BaseModel):
     email: EmailStr
     otp: str
     new_password: str
+
+class VendorRegister(BaseModel):
+    fullName: str
+    email: str
+    phone: str
+    address: str
+    vocation: str
+    accountNumber: str
+    bankName: str
+    photo: str  # base64 string
+    certificate: str  # base64 string

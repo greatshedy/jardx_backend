@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from astrapy import DataAPIClient
 from dotenv import load_dotenv
 import os
-from model import User,Login
+from model import User,Login, VendorRegister
 from utill import hashedpassword,VerifyHashed,decode_access_token,generate_otp,send_email,create_access_token
 
 
@@ -29,5 +29,6 @@ house_collection=db.get_collection("jard_houses")
 transactions_collection = db.get_collection("payment_transactions")
 portfolio_collection = db.get_collection("portfolio")
 jard_kidz_collection = db.get_collection("jard_kidz_plans")
+vendors_collection = db.get_collection("vendors")
 
 print("Astra DB connection initialized successfully.")

@@ -17,6 +17,10 @@ from PIL import Image
 from fastapi.responses import StreamingResponse
 import cloudinary
 import cloudinary.uploader
+import logging
+
+logger = logging.getLogger("jardx")
+
 
 
 # Use absolute path to ensure .env is loaded regardless of current working directory
