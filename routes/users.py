@@ -69,11 +69,11 @@ async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token
             "created_at": datetime.datetime.utcnow().isoformat()
         })
         
-        return JSONResponse({"message": "Registration successful", "status": 200}, status_code=200)
+        return JSONResponse({"message": "Registration successful", "status": 200})
         
     except Exception as e:
         logger.error(f"Error in /vendor-register: {e}")
-        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+        return JSONResponse({"message": str(e), "status": 500})
 
 from fastapi.templating import Jinja2Templates
 

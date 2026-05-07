@@ -29,6 +29,17 @@ house_collection=db.get_collection("jard_houses")
 transactions_collection = db.get_collection("payment_transactions")
 portfolio_collection = db.get_collection("portfolio")
 jard_kidz_collection = db.get_collection("jard_kidz_plans")
+# Ensure vendors collection exists
+existing_collections = db.list_collection_names()
+if "vendors" not in existing_collections:
+    print("Collection 'vendors' not found. Creating...")
+    try:
+        vendors_collection = db.create_collection("vendors")
+    except Exception as e:
+        print(f"Error creating vendors collection: {e}")
+        vendors_collection = db.get_collection("vendors")
+else:
+    vendors_collection = db.get_collection("vendors")
 
 # Ensure vendors collection exists
 existing_collections = db.list_collection_names()
