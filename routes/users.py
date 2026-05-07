@@ -2,7 +2,7 @@ from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Requ
 from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection
 import datetime
 import secrets
-from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url
+from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary
 
 from fastapi.responses import JSONResponse, Response
 from utill import generate_otp,get_token,send_email
@@ -105,27 +105,52 @@ async def Login(user:Login):
                 if password_state:
                     user_id={"id":user_from_db["_id"]}
                     token=create_access_token(user_id)
-                    return JSONResponse({"message":"Login Successful","token":token,"status":status.HTTP_200_OK})
+                    # Return user data (sanitize first)
+                    user_info = {
+                        "user_name": user_from_db.get("user_name", ""),
+                        "email": user_from_db.get("email", ""),
+                        "phone_number": user_from_db.get("phone_number", ""),
+                        "profile_pic": user_from_db.get("profile_pic", "")
+                    }
+                    return JSONResponse({"message":"Login Successful","token":token, "user": user_info, "status":status.HTTP_200_OK})
                 return JSONResponse({"message":"Incorrect password","status":status.HTTP_401_UNAUTHORIZED})
             except Exception as e:
                 logger.error(f"An error occured when trying to authenticate with password: {e}")
                 return JSONResponse({"message":"Password seems incorrect","status":status.HTTP_401_UNAUTHORIZED})
         return JSONResponse({"message":"User does not exit","status":status.HTTP_401_UNAUTHORIZED})
         
-    
-
     # Verifying with otp
     elif user_data["otp"] !="":
         user_from_db=user_collection.find_one({"email":user_data["email"]})
         if user_from_db:
             try:
+                # Check expiry
+                expiry = user_from_db.get("otp_expiry")
+                now = int(time.time())
+                if expiry and isinstance(expiry, (int, float)):
+                    if now > expiry:
+                        return JSONResponse({"message":"OTP has expired","status":status.HTTP_401_UNAUTHORIZED})
+
                 if user_data["otp"]==user_from_db["otp"]:
                     user_id={"id":user_from_db["_id"]}
                     token=create_access_token(user_id)
-                    return JSONResponse({"message":"Login Successful","token":token,"status":status.HTTP_200_OK})
-                return JSONResponse({"message":"Incorrect password","status":status.HTTP_401_UNAUTHORIZED})
+                    # Return user data (sanitize first)
+                    user_info = {
+                        "user_name": user_from_db.get("user_name", ""),
+                        "email": user_from_db.get("email", ""),
+                        "phone_number": user_from_db.get("phone_number", ""),
+                        "profile_pic": user_from_db.get("profile_pic", "")
+                    }
+                    # Reset OTP and rate-limit tracking after successful login
+                    user_collection.update_one(
+                        {"_id": user_from_db["_id"]}, 
+                        {"$set": {"otp": "", "otp_resend_count": 0, "otp_block_until": None}}
+                    )
+                    return JSONResponse({"message":"Login Successful","token":token, "user": user_info, "status":status.HTTP_200_OK})
+                return JSONResponse({"message":"Incorrect OTP","status":status.HTTP_401_UNAUTHORIZED})
             except Exception as e:
                 logger.error(f"An error occured when trying to authenticate with OTP: {e}")
+                return JSONResponse({"message":"OTP verification failed","status":status.HTTP_401_UNAUTHORIZED})
         return JSONResponse({"message":"User not found","status":status.HTTP_401_UNAUTHORIZED})
         
 
@@ -216,8 +241,47 @@ async def Forgotten_password(payload: ForgotPassword, background_tasks: Backgrou
                 "status": status.HTTP_404_NOT_FOUND
             })
         
+        now = int(time.time())
+        
+        # Check if user is blocked
+        block_until = user.get("otp_block_until")
+        if block_until and isinstance(block_until, (int, float)):
+            if now < block_until:
+                remaining_mins = int((block_until - now) / 60)
+                if remaining_mins < 1: remaining_mins = 1
+                return JSONResponse({
+                    "message": f"Too many attempts. Please try again in {remaining_mins} minutes.",
+                    "status": 429
+                })
+
+        # Track resends
+        resend_count = user.get("otp_resend_count", 0)
+        
+        # If last OTP was sent more than 30 mins ago, reset the count
+        last_sent = user.get("otp_last_sent")
+        if last_sent and isinstance(last_sent, (int, float)):
+            if (now - last_sent) > 1800: # 30 mins
+                resend_count = 0
+
+        resend_count += 1
+        
         otp = generate_otp()
-        user_collection.update_one({"email": email}, {"$set": {"otp": otp}})
+        expiry = now + 60 # 1 minute
+        
+        updates = {
+            "otp": otp,
+            "otp_expiry": expiry,
+            "otp_resend_count": resend_count,
+            "otp_last_sent": now
+        }
+
+        if resend_count >= 4:
+            updates["otp_block_until"] = now + 1800 # 30 minutes
+            updates["otp_resend_count"] = 0 # Reset for next session
+        else:
+            updates["otp_block_until"] = None # Clear block if still within limit
+
+        user_collection.update_one({"email": email}, {"$set": updates})
         
         background_tasks.add_task(send_email, email, otp)
         
@@ -228,7 +292,7 @@ async def Forgotten_password(payload: ForgotPassword, background_tasks: Backgrou
     except Exception as e:
         logger.error(f"Error in Forgotten_password: {e}")
         return JSONResponse({
-            "message": "Internal server error",
+            "message": f"Internal server error: {str(e)}",
             "status": status.HTTP_500_INTERNAL_SERVER_ERROR
         })
 
@@ -654,7 +718,7 @@ async def delete_account(data: dict = Depends(get_token)):
 
 # user Credit wallet endpoint
 @router.post("/credit-wallet")
-async def credit_wallet( Amount:dict,data: dict = Depends(get_token)):
+async def credit_wallet( Amount:dict, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
     print(Amount["amount"])
     try:
         if not data:
@@ -903,29 +967,51 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
 async def upload_profile_pic(file: UploadFile = File(...), data: dict = Depends(get_token)):
     user_id = data["id"]
     try:
-        # Define base path (absolute)
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
-        # Use a fixed filename to automatically overwrite old pictures
-        filename = f"profile_{user_id}.jpg"
-        filepath = os.path.join(base_dir, "uploads", "profiles", filename)
-        
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        # Save file
+        # Get old user data to find the current profile pic
+        user_data = user_collection.find_one({"_id": user_id})
+        if user_data and user_data.get("profile_pic"):
+            old_pic = user_data["profile_pic"]
+            if "cloudinary" in old_pic:
+                # Delete old pic from Cloudinary
+                delete_from_cloudinary(old_pic)
+
+        # Read file contents
         contents = await file.read()
-        with open(filepath, "wb") as f:
-            f.write(contents)
+        
+        # Upload directly to Cloudinary
+        pic_url = upload_to_cloudinary(contents, folder="profiles")
+        
+        if not pic_url:
+            return JSONResponse({"message": "Upload to cloud failed", "status": 500})
             
-        # Update user record with relative URL
-        pic_url = f"/uploads/profiles/{filename}"
+        # Update user record with Cloudinary URL
         user_collection.update_one({"_id": user_id}, {"$set": {"profile_pic": pic_url}})
         
         return JSONResponse({"message": "Profile picture updated", "status": 200, "url": pic_url})
     except Exception as e:
         logger.error(f"Upload Error: {e}")
         return JSONResponse({"message": f"Upload failed: {str(e)}", "status": 500})
+
+
+# Profile Update endpoint
+@router.post("/update-profile")
+async def update_profile(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        updates = {}
+        if "user_name" in payload:
+            updates["user_name"] = payload["user_name"]
+        if "phone_number" in payload:
+            updates["phone_number"] = payload["phone_number"]
+            
+        if not updates:
+            return JSONResponse({"message": "No updates provided", "status": 400})
+            
+        user_collection.update_one({"_id": user_id}, {"$set": updates})
+        return JSONResponse({"message": "Profile updated successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in update_profile: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
 
 
 # Bank Account Management
@@ -992,4 +1078,66 @@ async def update_bank_account(bank_id: str, updated_bank: dict, data: dict = Dep
         return JSONResponse({"message": "Bank account updated successfully", "status": 200})
     except Exception as e:
         logger.error(f"Error in update_bank_account: {e}")
-        return JSONResponse({"message": str(e), "status": 500})
+        return JSONResponse({"message": str(e), "status": 500})
+@router.post("/jardhouz-register")
+async def register_jardhouz_membership(details: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        user = user_collection.find_one({"_id": user_id})
+        
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404})
+            
+        if user.get("is_jardhouz_registered"):
+            return JSONResponse({"message": "Already a JardHouz member", "status": 400})
+            
+        # Check balance
+        entrance_fee = 100000.0
+        current_balance = float(user.get("wallet_balance", 0))
+        
+        if current_balance < entrance_fee:
+            return JSONResponse({"message": "Insufficient balance for entrance fee", "status": 400})
+            
+        # Deduct fee
+        new_balance = current_balance - entrance_fee
+        
+        # Generate JH-ID
+        import random
+        jh_id = f"JH-{random.randint(1000, 9999)}"
+        
+        # Update user record
+        update_data = {
+            "wallet_balance": new_balance,
+            "is_jardhouz_registered": True,
+            "jardhouz_id": jh_id,
+            "jardhouz_details": {
+                "full_name": details.get("fullName"),
+                "email": details.get("email"),
+                "phone": details.get("phoneNumber"),
+                "address": details.get("address"),
+                "age": details.get("age"),
+                "source_of_income": details.get("sourceOfIncome"),
+                "registered_at": datetime.datetime.utcnow().isoformat()
+            }
+        }
+        
+        user_collection.update_one({"_id": user_id}, {"$set": update_data})
+        
+        # Record transaction
+        transactions_collection.insert_one({
+            "tx_ref": f"JH-REG-{secrets.token_hex(6).upper()}",
+            "user_id": user_id,
+            "amount": entrance_fee,
+            "gateway": "Wallet",
+            "type": "DEBIT",
+            "purpose": "JardHouz Entrance Fee",
+            "status": "SUCCESS",
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+        
+        logger.info(f"User {user_id} registered for JardHouz. ID: {jh_id}")
+        return JSONResponse({"message": "Registration successful", "jardhouz_id": jh_id, "status": 200})
+        
+    except Exception as e:
+        logger.error(f"Error in jardhouz-register: {e}")
+        return JSONResponse({"message": str(e), "status": 500})

@@ -198,73 +198,119 @@ async def handle_payment_webhook(provider: str, request: Request):
 
 
 @router.get("/history")
-async def get_payment_history(month: int = None, year: int = None, data: dict = Depends(get_token)):
+async def get_payment_history(
+    month: int = None, 
+    year: int = None, 
+    status_filter: str = None,
+    purpose_filter: str = None,
+    page: int = 1,
+    limit: int = 50,
+    data: dict = Depends(get_token)
+):
+    """
+    Organized transaction history with filtering and pagination.
+    """
     user_id = data.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid user")
 
     try:
+        # Base Query
         query = {"user_id": user_id}
         
-        # If month and year are provided, add range filter
+        # 1. Date Filtering
         if (month is not None) and (year is not None):
-            # Start of the month
-            start_date = datetime.datetime(year, month, 1).isoformat()
-            # End of the month
+            start_date = f"{year}-{month:02d}-01"
             last_day = calendar.monthrange(year, month)[1]
-            end_date = datetime.datetime(year, month, last_day, 23, 59, 59).isoformat()
-            
+            end_date = f"{year}-{month:02d}-{last_day}T23:59:59"
             query["created_at"] = {"$gte": start_date, "$lte": end_date}
-            logger.info(f"DEBUG: Transaction Query Filter: {month}/{year} | Range: {start_date} to {end_date}")
         elif year:
-            # Filter by year only
-            start_date = datetime.datetime(year, 1, 1).isoformat()
-            end_date = datetime.datetime(year, 12, 31, 23, 59, 59).isoformat()
+            start_date = f"{year}-01-01"
+            end_date = f"{year}-12-31T23:59:59"
             query["created_at"] = {"$gte": start_date, "$lte": end_date}
-            logger.info(f"DEBUG: Transaction Query Filter Year: {year} | Range: {start_date} to {end_date}")
 
-        logger.info(f"DEBUG: Final Query: {query}")
-        # Fetch transactions for this user, sorted by newest first
-        transactions = list(transactions_collection.find(query).sort({"created_at": -1}))
+        # 2. Status Filtering (Backend mapping)
+        if status_filter and status_filter != "All":
+            status_map = {
+                "Successful": ["SUCCESSFUL", "SUCCESS"],
+                "Failed": ["FAILED", "DECLINED"],
+                "In Progress": ["PENDING", "PROCESSING"]
+            }
+            if status_filter in status_map:
+                query["status"] = {"$in": status_map[status_filter]}
+
+        # 3. Purpose/Category Filtering
+        if purpose_filter and purpose_filter != "All":
+            # Map frontend labels to backend search terms
+            if purpose_filter == "JardHouz":
+                query["purpose"] = {"$regex": "Purchase|Installment", "$options": "i"}
+            elif purpose_filter == "Referral bonus":
+                query["purpose"] = {"$regex": "Referral", "$options": "i"}
+            else:
+                query["purpose"] = {"$regex": purpose_filter, "$options": "i"}
+
+        # 4. Pagination & Execution
+        skip = (page - 1) * limit if page > 0 else 0
+        try:
+            total_count = transactions_collection.count_documents(query, upper_bound=1000)
+        except:
+            total_count = len(list(transactions_collection.find(query, projection={"_id": 1})))
         
-        # Convert ObjectIds and prepare response
+        cursor = transactions_collection.find(
+            query,
+            sort={"created_at": -1},
+            limit=limit,
+            skip=skip
+        )
+        transactions = list(cursor)
+        
+        # 5. Normalization & Enrichment
         now = datetime.datetime.utcnow()
         for tx in transactions:
             tx["_id"] = str(tx["_id"])
             
             # Normalize status for UI
             db_status = tx.get("status", "PENDING").upper()
-            
-            # 🕰️ If it's still PENDING but more than 1 hour old, treat it as FAILED/EXPIRED in UI
-            if db_status == "PENDING":
+            if db_status in ["SUCCESSFUL", "SUCCESS"]:
+                tx["status"] = "SUCCESSFUL"
+            elif db_status in ["FAILED", "DECLINED"]:
+                tx["status"] = "FAILED"
+            else:
+                # 🕰️ Auto-fail old pending transactions (1 hour limit)
                 created_at = tx.get("created_at")
                 if created_at:
                     try:
                         tx_time = datetime.datetime.fromisoformat(created_at)
-                        if (now - tx_time).total_seconds() > 3600: # 1 hour
-                            db_status = "FAILED"
-                    except Exception:
-                        pass
+                        if (now - tx_time).total_seconds() > 3600:
+                            tx["status"] = "FAILED"
+                        else:
+                            tx["status"] = "PENDING"
+                    except:
+                        tx["status"] = "PENDING"
+                else:
+                    tx["status"] = "PENDING"
 
-            if db_status == "SUCCESS":
-                tx["status"] = "SUCCESSFUL"
-            elif db_status == "FAILED":
-                tx["status"] = "FAILED"
-            else:
-                tx["status"] = "PENDING"
-
-            # Add a 'type' flag if missing
+            # Add missing metadata defaults
             if "type" not in tx:
-                tx["type"] = "CREDIT" if db_status == "SUCCESS" else "PENDING"
+                tx["type"] = "CREDIT" if tx["status"] == "SUCCESSFUL" else "DEBIT"
             
             if "purpose" not in tx:
                 tx["purpose"] = f"Wallet Funding ({tx.get('gateway', 'Unknown')})"
         
-        return {"status": "success", "data": transactions}
+        return {
+            "status": "success", 
+            "data": transactions,
+            "metadata": {
+                "total_count": total_count,
+                "page": page,
+                "limit": limit,
+                "pages": (total_count + limit - 1) // limit
+            }
+        }
 
-        
     except Exception as e:
-        logger.error(f"Error fetching history: {str(e)}")
+        import traceback
+        logger.error(f"History Fetch Error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Could not fetch transaction history")
 
 

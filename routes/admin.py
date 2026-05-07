@@ -3,7 +3,7 @@ from model import House, JardKidzPlan
 from db.database import house_collection, jard_kidz_collection, user_collection, transactions_collection
 from fastapi.responses import JSONResponse
 from starlette import status
-from utill import chunk_base64_string,reassemble_base64_string, get_image_url
+from utill import chunk_base64_string,reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary
 
 import logging
 import os
@@ -15,25 +15,25 @@ logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/admin", tags=["Admin"]) 
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads", "houses")
-
 def save_house_image(file: UploadFile):
-    # Check file size (200KB = 200 * 1024 bytes)
+    # Check file size (e.g., 500KB limit for Cloudinary optimized images)
     file.file.seek(0, os.SEEK_END)
     file_size = file.file.tell()
     file.file.seek(0)
     
-    if file_size > 200 * 1024:
-        return None, "File size exceeds 200KB limit."
+    if file_size > 1024 * 1024: # Allowing up to 1MB now since Cloudinary handles it well
+        return None, "File size exceeds 1MB limit."
     
-    # Generate unique filename
-    filename = f"{secrets.token_hex(8)}{os.path.splitext(file.filename)[1] or '.jpg'}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    # Read file contents
+    contents = file.file.read()
     
-    with open(filepath, "wb") as buffer:
-        buffer.write(file.file.read())
+    # Upload to Cloudinary
+    url = upload_to_cloudinary(contents, folder="houses")
     
-    return f"/uploads/houses/{filename}", None
+    if not url:
+        return None, "Upload to Cloudinary failed."
+    
+    return url, None
 
 @router.post("/add-house")
 async def add_house(
@@ -99,6 +99,13 @@ async def get_house():
 
 @router.delete("/delete-house/{house_id}")
 async def delete_house(house_id:str):
+    # Find house first to get image URLs
+    house = house_collection.find_one({"_id": house_id})
+    if house and house.get("house_image"):
+        for img_url in house["house_image"]:
+            if "cloudinary" in img_url:
+                delete_from_cloudinary(img_url)
+    
     house_collection.delete_one({"_id":house_id})
     return JSONResponse({"message":"House deleted successfully","status":status.HTTP_200_OK})
 
@@ -145,6 +152,15 @@ async def update_house(
             else:
                 cleaned_existing.append(img)
         final_images = cleaned_existing
+
+        # Identify images being removed from the existing list
+        if house_name: # Just a check to see if we have house data
+            house = house_collection.find_one({"_id": house_id})
+            if house and house.get("house_image"):
+                for old_img in house["house_image"]:
+                    if old_img not in final_images and "cloudinary" in old_img:
+                        # This image was removed from the list, delete it from cloud
+                        delete_from_cloudinary(old_img)
 
         if images:
             for img in images:
@@ -351,14 +367,4 @@ async def reject_transaction(tx_ref: str):
         return JSONResponse({"message": "Transaction rejected", "status": 200})
     except Exception as e:
         logger.error(f"Error rejecting transaction {tx_ref}: {e}")
-        return JSONResponse({"message": str(e), "status": 500})
-
-@router.delete("/delete-transaction/{tx_ref}")
-async def delete_transaction(tx_ref: str):
-    try:
-        transactions_collection.delete_one({"tx_ref": tx_ref})
-        logger.info(f"Admin DELETED transaction {tx_ref}")
-        return JSONResponse({"message": "Transaction deleted successfully", "status": 200})
-    except Exception as e:
-        logger.error(f"Error deleting transaction {tx_ref}: {e}")
         return JSONResponse({"message": str(e), "status": 500})

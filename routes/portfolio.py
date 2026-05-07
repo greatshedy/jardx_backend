@@ -101,33 +101,23 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
 
         # Record Portfolio Items
-        portfolio_collection.insert_one(portfolio_item)
-        
-        # Extract Image for History
-        house_image = ""
-        if isinstance(house.get("house_image"), list) and len(house["house_image"]) > 0:
-            first_img_item = house["house_image"][0]
-            house_image = reassemble_base64_string(first_img_item) if isinstance(first_img_item, list) else first_img_item
+        result = portfolio_collection.insert_one(portfolio_item)
+        portfolio_id = str(result.inserted_id)
 
-        # Record Transaction for History (Using URL instead of heavy base64)
-        first_house_img = ""
-        if house.get("house_image") and len(house["house_image"]) > 0:
-            raw_img = house["house_image"][0]
-            # If it's a URL (string) we store it; if it's legacy chunked data (list), we skip it
-            if isinstance(raw_img, str):
-                first_house_img = get_image_url(raw_img)
-
+        # Record Transaction for History
         transactions_collection.insert_one({
             "tx_ref": f"BUY-{secrets.token_hex(6).upper()}",
             "user_id": user_id,
+            "portfolio_id": portfolio_id, # Link to portfolio
             "amount": purchase.amount_to_pay,
             "gateway": "Wallet",
             "type": "DEBIT",
             "purpose": f"Purchase: {house['house_name']}",
             "unit_sqm": house_plan.get("unitSqm", "N/A"),
-            "house_image": first_house_img, 
+            "house_image": "", 
             "status": "SUCCESS",
-            "created_at": datetime.datetime.utcnow().isoformat()
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "months_covered": 0 # Initial payment
         })
 
         
@@ -167,6 +157,75 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         logger.error(f"Purchase Error: {e}")
         return JSONResponse(status_code=500, content={"message": "An error occurred during purchase."})
 
+@router.post("/jardhouz/save")
+def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        
+        user = user_collection.find_one({"_id": user_id})
+        estate_name = saving_data.get("estate")
+        target_amount = float(saving_data.get("target_amount", 0))
+        duration = int(saving_data.get("duration", 0))
+        frequency = saving_data.get("frequency")
+        first_payment = float(saving_data.get("amount_to_pay", 0))
+
+        if not user or first_payment <= 0:
+            return JSONResponse(status_code=400, content={"message": "Invalid data or insufficient payment"})
+        
+        current_balance = float(user.get("wallet_balance", 0.0))
+        if current_balance < first_payment:
+            return JSONResponse(status_code=400, content={"message": "Insufficient wallet balance"})
+
+        # Fetch house details for image
+        house = house_collection.find_one({"house_name": estate_name})
+        house_image = house.get("house_image", [])[0] if house and house.get("house_image") else ""
+
+        # Create Portfolio Item (Saving Plan)
+        portfolio_item = {
+            "user_id": user_id,
+            "house_name": estate_name,
+            "house_id": str(house["_id"]) if house else None,
+            "plan_type": "JardHouz Saving",
+            "total_price": target_amount,
+            "amount_paid": first_payment,
+            "remaining_balance": target_amount - first_payment,
+            "duration_months": duration,
+            "frequency": frequency,
+            "monthly_payment": first_payment, # The recurring amount
+            "is_jardhouz_saving": True,
+            "status": "Active",
+            "house_image": house_image,
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "next_payment_date": (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+        }
+
+        # Record and deduct
+        result = portfolio_collection.insert_one(portfolio_item)
+        portfolio_id = str(result.inserted_id)
+        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": current_balance - first_payment}})
+
+        # Record Transaction
+        transactions_collection.insert_one({
+            "tx_ref": f"JH-SAVE-{secrets.token_hex(4).upper()}",
+            "user_id": user_id,
+            "portfolio_id": portfolio_id, # Link to portfolio
+            "amount": first_payment,
+            "gateway": "Wallet",
+            "type": "DEBIT",
+            "purpose": f"JardHouz Saving: {estate_name}",
+            "status": "SUCCESS",
+            "created_at": datetime.datetime.utcnow().isoformat(),
+            "months_covered": 1
+        })
+
+        return JSONResponse(status_code=200, content={"message": "Saving plan started successfully!"})
+
+    except Exception as e:
+        logger.error(f"JH Save Error: {e}")
+        return JSONResponse(status_code=500, content={"message": "Could not start saving plan"})
+
 @router.get("/my-portfolio")
 def get_portfolio(data: dict = Depends(get_token)):
     try:
@@ -202,8 +261,54 @@ def get_portfolio(data: dict = Depends(get_token)):
         logger.error(f"Portfolio Fetch Error: {e}")
         return JSONResponse(status_code=500, content={"message": "Could not fetch portfolio"})
 
+@router.get("/estate/{portfolio_id}")
+def get_portfolio_item(portfolio_id: str, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        
+        item = portfolio_collection.find_one({"_id": portfolio_id, "user_id": user_id})
+        if not item:
+            return JSONResponse(status_code=404, content={"message": "Estate not found in your portfolio"})
+        
+        item["_id"] = str(item["_id"])
+        
+        # Fetch latest 5 transactions for this portfolio
+        history = list(transactions_collection.find(
+            {"portfolio_id": portfolio_id, "user_id": user_id},
+            sort={"created_at": -1},
+            limit=5
+        ))
+        for h_item in history:
+            h_item["_id"] = str(h_item["_id"])
+        
+        item["payment_history"] = history
+        
+        # Resolve Image
+        from utill import get_image_url
+        h_img = item.get("house_image")
+        if not h_img or isinstance(h_img, list):
+            h = house_collection.find_one({"_id": item.get("house_id")})
+            if h and h.get("house_image") and len(h["house_image"]) > 0:
+                first_img = h["house_image"][0]
+                if isinstance(first_img, str) and not first_img.startswith("data:"):
+                    item["house_image"] = get_image_url(first_img)
+                else:
+                    item["house_image"] = ""
+            else:
+                item["house_image"] = ""
+        elif isinstance(h_img, str) and not h_img.startswith("data:"):
+            item["house_image"] = get_image_url(h_img)
+            
+        return JSONResponse(status_code=200, content={"message": "Success", "data": item})
+
+    except Exception as e:
+        logger.error(f"Portfolio Item Fetch Error: {e}")
+        return JSONResponse(status_code=500, content={"message": "Could not fetch estate details"})
+
 @router.post("/pay-installment/{portfolio_id}")
-def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
+def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payload: dict = None, data: dict = Depends(get_token)):
     try:
         user_id = data.get("id")
         if not user_id:
@@ -215,86 +320,93 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, data: 
         if not portfolio or portfolio["status"] == "Completed":
             return JSONResponse(status_code=404, content={"message": "Active portfolio not found"})
 
-        monthly_due = portfolio["monthly_payment"]
+        # Get months to pay from payload, default to 1
+        num_months = 1
+        if payload and "months_paid" in payload:
+            num_months = int(payload["months_paid"])
+        elif payload and "months" in payload: # Fallback for different naming
+            num_months = int(payload["months"])
+
+        monthly_base = float(portfolio.get("monthly_payment", 0))
+        total_due = monthly_base * num_months
         current_balance = float(user.get("wallet_balance", 0.0))
 
-        if current_balance < monthly_due:
-            return JSONResponse(status_code=400, content={"message": "Insufficient wallet balance to pay monthly installment. Please top up."})
+        if current_balance < total_due:
+            return JSONResponse(status_code=400, content={"message": f"Insufficient balance. You need ₦{total_due:,.2f} but have ₦{current_balance:,.2f}"})
 
-        # Calculate everything BEFORE updating any records to prevent partial failure
+        # Calculate everything BEFORE updating any records
         try:
-            months_paid = portfolio["months_paid"] + 1
-            remaining_balance = portfolio["remaining_balance"] - monthly_due
+            # Use .get() to avoid KeyError if 'months_paid' is missing
+            current_months_paid = portfolio.get("months_paid", 0)
+            new_months_paid = current_months_paid + num_months
             
-            status = "Completed" if months_paid >= portfolio["duration_months"] or remaining_balance <= 0.5 else "Active"
+            current_amount_paid = float(portfolio.get("amount_paid", 0))
+            new_amount_paid = current_amount_paid + total_due
+            
+            remaining_balance = float(portfolio.get("remaining_balance", 0)) - total_due
+            
+            # Status check
+            status = "Completed" if new_months_paid >= portfolio.get("duration_months", 24) or remaining_balance <= 0.5 else "Active"
             
             # Robust date parsing
             next_date = ""
             if status == "Active":
                 try:
-                    # fromisoformat is much more robust than strptime for ISO strings
-                    current_next_date = datetime.datetime.fromisoformat(portfolio["next_payment_date"])
-                    next_date = (current_next_date + relativedelta(months=1)).isoformat()
+                    # Increment next payment date by the number of months paid
+                    current_next_date = datetime.datetime.fromisoformat(portfolio.get("next_payment_date", datetime.datetime.utcnow().isoformat()))
+                    next_date = (current_next_date + relativedelta(months=num_months)).isoformat()
                 except (ValueError, TypeError, KeyError):
-                    # Fallback if date is missing or malformed
-                    next_date = (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+                    next_date = (datetime.datetime.utcnow() + relativedelta(months=num_months)).isoformat()
 
-            # 1. Update portfolio (Progress update)
+            # 1. Update portfolio
             portfolio_collection.update_one(
                 {"_id": portfolio_id},
                 {"$set": {
-                    "months_paid": months_paid,
-                    "remaining_balance": remaining_balance,
-                    "amount_paid": portfolio["amount_paid"] + monthly_due,
+                    "months_paid": new_months_paid,
+                    "remaining_balance": max(0, remaining_balance),
+                    "amount_paid": new_amount_paid,
                     "status": status,
                     "next_payment_date": next_date
                 }}
             )
-            logger.info(f"STEP 1 COMPLETE: Portfolio updated for {portfolio_id}")
 
-            # 2. Extract SQM and skip large image for installment history (prevents indexing crash)
-            h_data = house_collection.find_one({"_id": portfolio["house_id"]})
-            u_sqm = portfolio.get("unit_sqm", "N/A")
-            if h_data and u_sqm == "N/A":
-                u_sqm = h_data.get("house_pricing_plan", [{}])[0].get("unitSqm", "N/A")
-
-            # 3. Record Transaction for History (without large image)
+            # 2. Record Transaction
             transactions_collection.insert_one({
                 "tx_ref": f"PAY-{secrets.token_hex(6).upper()}",
                 "user_id": user_id,
-                "amount": monthly_due,
+                "portfolio_id": portfolio_id, # Link to portfolio
+                "amount": total_due,
                 "gateway": "Wallet",
                 "type": "DEBIT",
-                "purpose": f"Installment: {portfolio['house_name']}",
-                "unit_sqm": u_sqm,
-                "house_image": "", # Skip image here to avoid database indexing limits
+                "purpose": f"Installment ({num_months} mo): {portfolio['house_name']}",
+                "unit_sqm": portfolio.get("unit_sqm", "N/A"),
+                "house_image": "", 
                 "status": "SUCCESS",
-                "created_at": datetime.datetime.utcnow().isoformat()
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "months_covered": num_months
             })
-            logger.info(f"STEP 2 COMPLETE: Transaction recorded for {user_id}")
             
-            # 4. Update wallet (The final, critical step)
-            new_balance = current_balance - monthly_due
+            # 3. Update wallet
+            new_balance = current_balance - total_due
             user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
-            logger.info(f"STEP 3 COMPLETE: Wallet deducted for {user_id}. New Balance: {new_balance}")
 
-            # 5. Send receipt email
+            # 4. Send receipt email
             background_tasks.add_task(
                 send_purchase_email,
                 user.get("email"),
                 user.get("user_name"),
                 portfolio["house_name"],
-                "installment continuation",
-                monthly_due,
+                f"installment ({num_months} months)",
+                total_due,
                 remaining_balance,
-                "" # skip image for recurring
+                ""
             )
 
             return JSONResponse(status_code=200, content={"message": "Installment payment successful!"})
 
         except Exception as inner_e:
             logger.error(f"Logic Error in Pay Installment (Step failure): {inner_e}")
-            return JSONResponse(status_code=500, content={"message": "Internal error processing payment logic"})
+            return JSONResponse(status_code=500, content={"message": f"Internal logic error: {str(inner_e)}"})
 
     except Exception as e:
         logger.error(f"Pay Installment Error: {e}")

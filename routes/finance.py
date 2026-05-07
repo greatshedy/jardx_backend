@@ -214,17 +214,6 @@ async def approve_transaction(tx_ref: str, background_tasks: BackgroundTasks):
         return JSONResponse({"message": str(e), "status": 500})
 
 
-@router.delete("/delete-transaction/{tx_ref}")
-async def delete_transaction(tx_ref: str):
-    try:
-        transactions_collection.delete_one({"tx_ref": tx_ref})
-        logger.info(f"Admin DELETED transaction {tx_ref}")
-        return JSONResponse({"message": "Transaction deleted successfully", "status": 200})
-    except Exception as e:
-        logger.error(f"Error deleting transaction {tx_ref}: {e}")
-        return JSONResponse({"message": str(e), "status": 500})
-
-
 @router.post("/decline-transaction/{tx_ref}")
 async def decline_transaction(tx_ref: str):
     try:
