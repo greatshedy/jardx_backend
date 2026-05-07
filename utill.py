@@ -15,6 +15,8 @@ import base64
 import io
 from PIL import Image
 from fastapi.responses import StreamingResponse
+import cloudinary
+import cloudinary.uploader
 
 
 # Use absolute path to ensure .env is loaded regardless of current working directory
@@ -26,17 +28,82 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "fallback_secret_keep_this_secure")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", "http://10.12.228.168:8000")
 
+# Cloudinary Setup
+cloudinary_url = os.getenv("CLOUDINARY_URL")
+if cloudinary_url:
+    try:
+        # cloudinary://api_key:api_secret@cloud_name
+        parts = cloudinary_url.replace("cloudinary://", "").replace("\"", "").replace("'", "")
+        auth, cloud_name = parts.split("@")
+        api_key, api_secret = auth.split(":")
+        
+        cloudinary.config(
+            cloud_name=cloud_name,
+            api_key=api_key,
+            api_secret=api_secret,
+            secure=True
+        )
+    except Exception as e:
+        logger.error(f"Error parsing CLOUDINARY_URL: {e}")
+
 def get_image_url(image_path: str) -> str:
     """
     Converts a relative image path (/uploads/...) to a full URL.
     If the input is already a URL or base64, returns it as is.
+    Now supports Cloudinary URLs as well.
     """
     if not image_path:
         return ""
-    if image_path.startswith("http") or image_path.startswith("data:"):
+    if image_path.startswith("http") or image_path.startswith("data:") or "cloudinary" in image_path:
         return image_path
     
     return f"{BACKEND_BASE_URL.rstrip('/')}/{image_path.lstrip('/')}"
+
+def upload_to_cloudinary(image_data: str, folder="jardx_uploads") -> str:
+    """
+    Uploads an image to Cloudinary and returns the secure URL.
+    Supports base64 strings, file paths, or public URLs.
+    """
+    try:
+        if not image_data:
+            return ""
+        
+        upload_result = cloudinary.uploader.upload(
+            image_data, 
+            folder=folder,
+            resource_type="auto"
+        )
+        return upload_result.get("secure_url", "")
+    except Exception as e:
+        print(f"ERROR: Cloudinary upload failed: {e}")
+        return ""
+
+def delete_from_cloudinary(url: str):
+    """
+    Deletes an image from Cloudinary given its secure URL.
+    """
+    try:
+        if not url or "cloudinary" not in url:
+            return
+        
+        # Extract public_id from URL
+        # Example: https://res.cloudinary.com/cloud_name/image/upload/v12345/folder/public_id.jpg
+        # We need "folder/public_id"
+        
+        # Split by /upload/
+        if "/upload/" in url:
+            parts = url.split("/upload/")[1]
+            # Remove versioning (v12345/) if present
+            if parts.startswith("v"):
+                parts = "/".join(parts.split("/")[1:])
+            
+            # Remove file extension (.jpg, .png, etc.)
+            public_id = os.path.splitext(parts)[0]
+            
+            cloudinary.uploader.destroy(public_id)
+            print(f"DEBUG: Cloudinary image deleted: {public_id}")
+    except Exception as e:
+        print(f"ERROR: Cloudinary deletion failed: {e}")
 
 
 def generate_otp(length=4):
