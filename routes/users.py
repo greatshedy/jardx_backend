@@ -1,5 +1,5 @@
 from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Request, UploadFile, File
-from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection
+from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection
 import datetime
 import secrets
 from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary
@@ -12,14 +12,69 @@ import logging
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import os
-from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword
+from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, VendorRegister
 import shutil
 import time
 
 logger = logging.getLogger("jardx")
 
-
 router = APIRouter(prefix="/users", tags=["Users"])
+
+@router.post("/vendor-register")
+async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user_data = user_collection.find_one({"_id": user_id})
+        
+        if not user_data:
+            return JSONResponse({"message": "User not found", "status": 404})
+            
+        # Check balance
+        if user_data.get("wallet_balance", 0) < 25000:
+            return JSONResponse({"message": "Insufficient balance", "status": 400})
+            
+        # Upload images to Cloudinary
+        photo_url = ""
+        cert_url = ""
+        
+        if vendor.photo:
+            photo_url = upload_to_cloudinary(vendor.photo, f"vendors/photos/{user_id}")
+            
+        if vendor.certificate:
+            cert_url = upload_to_cloudinary(vendor.certificate, f"vendors/certs/{user_id}")
+            
+        # Prepare vendor record
+        vendor_record = vendor.dict()
+        vendor_record["user_id"] = user_id
+        vendor_record["photo"] = photo_url
+        vendor_record["certificate"] = cert_url
+        vendor_record["status"] = "unverified"
+        vendor_record["created_at"] = datetime.datetime.utcnow().isoformat()
+        
+        # Save to database
+        vendors_collection.insert_one(vendor_record)
+        
+        # Deduct fee
+        new_balance = float(user_data["wallet_balance"]) - 25000
+        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        
+        # Record transaction
+        transactions_collection.insert_one({
+            "tx_ref": f"VNDR-{secrets.token_hex(6).upper()}",
+            "user_id": user_id,
+            "amount": 25000.0,
+            "type": "DEBIT",
+            "purpose": "Vendor Registration Fee",
+            "status": "SUCCESS",
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+        
+        return JSONResponse({"message": "Registration successful", "status": 200})
+        
+    except Exception as e:
+        logger.error(f"Error in /vendor-register: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
 from fastapi.templating import Jinja2Templates
 
 @router.get("/join")
