@@ -41,16 +41,4 @@ if "vendors" not in existing_collections:
 else:
     vendors_collection = db.get_collection("vendors")
 
-# Ensure vendors collection exists
-existing_collections = db.list_collection_names()
-if "vendors" not in existing_collections:
-    print("Collection 'vendors' not found. Creating...")
-    try:
-        vendors_collection = db.create_collection("vendors")
-    except Exception as e:
-        print(f"Error creating vendors collection: {e}")
-        vendors_collection = db.get_collection("vendors")
-else:
-    vendors_collection = db.get_collection("vendors")
-
 print("Astra DB connection initialized successfully.")
