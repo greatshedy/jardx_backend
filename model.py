@@ -99,3 +99,15 @@ class VendorRegister(BaseModel):
     bankName: str
     photo: str  # base64 string
     certificate: str  # base64 string
+
+class PartnerRegister(BaseModel):
+    fullName: str
+    email: str
+    phone: str
+    address: str
+    skills: str
+    accountNumber: str
+    bankName: str
+    photo: str  # base64 string
+    certificate: str  # base64 string
+

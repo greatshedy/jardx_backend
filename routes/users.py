@@ -1,5 +1,5 @@
 from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Request, UploadFile, File
-from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection
+from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection
 import datetime
 import secrets
 from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary
@@ -12,7 +12,7 @@ import logging
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import os
-from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, VendorRegister
+from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, VendorRegister, PartnerRegister
 import shutil
 import time
 
@@ -117,6 +117,109 @@ async def update_vendor_photo(payload: dict, data: dict = Depends(get_token)):
     except Exception as e:
         logger.error(f"Error in /update-vendor-photo: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/partner-register")
+async def partner_register(partner: PartnerRegister, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user_data = user_collection.find_one({"_id": user_id})
+        
+        if not user_data:
+            return JSONResponse({"message": "User not found", "status": 404})
+            
+        # Check balance
+        fee = 100000
+        if user_data.get("wallet_balance", 0) < fee:
+            return JSONResponse({"message": "Insufficient balance", "status": 400})
+            
+        # Upload images to Cloudinary
+        photo_url = ""
+        cert_url = ""
+        
+        if partner.photo:
+            photo_url = upload_to_cloudinary(partner.photo, f"partners/photos/{user_id}")
+            
+        if partner.certificate:
+            cert_url = upload_to_cloudinary(partner.certificate, f"partners/certs/{user_id}")
+            
+        # Prepare partner record
+        partner_record = partner.dict()
+        partner_record["user_id"] = user_id
+        partner_record["photo"] = photo_url
+        partner_record["certificate"] = cert_url
+        partner_record["status"] = "unverified"
+        partner_record["created_at"] = datetime.datetime.utcnow().isoformat()
+        
+        # Save to database
+        partners_collection.insert_one(partner_record)
+        
+        # Update user status
+        user_collection.update_one({"_id": user_id}, {"$set": {"is_partner": True}})
+        
+        # Deduct fee
+        new_balance = float(user_data["wallet_balance"]) - fee
+        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        
+        # Record transaction
+        transactions_collection.insert_one({
+            "tx_ref": f"PRTN-{secrets.token_hex(6).upper()}",
+            "user_id": user_id,
+            "amount": float(fee),
+            "type": "DEBIT",
+            "purpose": "Partner Registration Fee",
+            "status": "SUCCESS",
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+        
+        return JSONResponse({"message": "Registration successful", "status": 200})
+        
+    except Exception as e:
+        logger.error(f"Error in /partner-register: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.get("/partner-details")
+async def get_partner_details(data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        partner_data = partners_collection.find_one({"user_id": user_id})
+        
+        if not partner_data:
+            return JSONResponse({"message": "Partner record not found", "status": 404}, status_code=404)
+            
+        # Convert _id to string
+        partner_data["_id"] = str(partner_data["_id"])
+        
+        return JSONResponse({"status": 200, "data": partner_data}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /partner-details: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/update-partner-photo")
+async def update_partner_photo(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        photo_base64 = payload.get("photo")
+        
+        if not photo_base64:
+            return JSONResponse({"message": "No photo data provided", "status": 400}, status_code=400)
+            
+        # Upload to Cloudinary
+        photo_url = upload_to_cloudinary(photo_base64, f"partners/photos/{user_id}")
+        
+        if not photo_url:
+            return JSONResponse({"message": "Upload failed", "status": 500}, status_code=500)
+            
+        # Update database
+        partners_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"photo": photo_url}}
+        )
+        
+        return JSONResponse({"message": "Photo updated successfully", "url": photo_url, "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /update-partner-photo: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
 
 from fastapi.templating import Jinja2Templates
 

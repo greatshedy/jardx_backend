@@ -41,4 +41,14 @@ if "vendors" not in existing_collections:
 else:
     vendors_collection = db.get_collection("vendors")
 
-print("Astra DB connection initialized successfully.")
+if "partners" not in existing_collections:
+    print("Collection 'partners' not found. Creating...")
+    try:
+        partners_collection = db.create_collection("partners")
+    except Exception as e:
+        print(f"Error creating partners collection: {e}")
+        partners_collection = db.get_collection("partners")
+else:
+    partners_collection = db.get_collection("partners")
+
+print("Astra DB connection initialized successfully.")
