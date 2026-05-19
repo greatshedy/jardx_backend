@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends
 from utill import send_wallet_credit_email
 from db.database import transactions_collection, portfolio_collection, user_collection, jard_kidz_collection, house_collection
 from fastapi.responses import JSONResponse
@@ -6,10 +6,15 @@ from starlette import status
 from datetime import datetime
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from .admin import verify_admin_token
 
 logger = logging.getLogger("jardx")
 
-router = APIRouter(prefix="/admin/finance", tags=["Admin Finance"])
+router = APIRouter(
+    prefix="/admin/finance", 
+    tags=["Admin Finance"], 
+    dependencies=[Depends(verify_admin_token)]
+)
 
 # Global executor for parallelizing Astra DB calls (more efficient than creating per-request)
 executor = ThreadPoolExecutor(max_workers=20)

@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from astrapy import DataAPIClient
 from dotenv import load_dotenv
 import os
-from model import User,Login, VendorRegister
+from model import User, Login, JardAccount
 from utill import hashedpassword,VerifyHashed,decode_access_token,generate_otp,send_email,create_access_token
 
 
@@ -51,4 +51,20 @@ if "partners" not in existing_collections:
 else:
     partners_collection = db.get_collection("partners")
 
-print("Astra DB connection initialized successfully.")
+# JardProc Collections
+if "products" not in existing_collections:
+    products_collection = db.create_collection("products")
+else:
+    products_collection = db.get_collection("products")
+
+if "orders" not in existing_collections:
+    orders_collection = db.create_collection("orders")
+else:
+    orders_collection = db.get_collection("orders")
+
+if "reviews" not in existing_collections:
+    reviews_collection = db.create_collection("reviews")
+else:
+    reviews_collection = db.get_collection("reviews")
+
+print("Astra DB connection initialized successfully.")

@@ -89,25 +89,53 @@ class ResetPassword(BaseModel):
     otp: str
     new_password: str
 
-class VendorRegister(BaseModel):
+class JardAccount(BaseModel):
     fullName: str
     email: str
     phone: str
     address: str
-    vocation: str
+    profession: str = "" # unified field
+    skills: str = ""    # legacy field for partners
+    vocation: str = ""  # legacy field for vendors
     accountNumber: str
     bankName: str
     photo: str  # base64 string
     certificate: str  # base64 string
+    accountType: str = "partner" # 'vendor' or 'partner'
 
-class PartnerRegister(BaseModel):
-    fullName: str
-    email: str
-    phone: str
-    address: str
-    skills: str
-    accountNumber: str
-    bankName: str
-    photo: str  # base64 string
-    certificate: str  # base64 string
+class Product(BaseModel):
+    name: str
+    description: str
+    price: float
+    image: str
+    category: str
+    stock: int
+    status: str = "In Stock"
+    volume_value: float = None
+    volume_unit: str = None
+    variants: list = []
+
+class OrderItem(BaseModel):
+    product_id: str
+    name: str
+    price: float
+    quantity: int
+
+class Order(BaseModel):
+    user_id: str
+    items: list[OrderItem]
+    total_amount: float
+    shipping_fee: float
+    final_total: float
+    shipping_address: dict
+    status: str = "Pending"
+    created_at: str = ""
+
+class Review(BaseModel):
+    product_id: str
+    user_id: str
+    user_name: str
+    rating: int
+    comment: str
+    created_at: str = ""
 

@@ -664,3 +664,81 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
                     {"_id": uid_str}, 
                     {"$set": {"referral_bonus_paid": True}}
                 )
+
+def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amount, items, address):
+    sender_email = os.getenv("SENDER_EMAIL")
+    sender_password = os.getenv("EMAIL_PASSWORD")
+    
+    if not sender_email or not sender_password:
+        print("Email configuration missing, cannot send purchase email.")
+        return
+
+    message = MIMEMultipart("alternative")
+    message["Subject"] = f"Invoice: Order #{order_id} Successful"
+    message["From"] = sender_email
+    message["To"] = receiver_email
+
+    items_html = ""
+    for item in items:
+        items_html += f"""
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #eee;">{item.get('name')} (x{item.get('quantity')})</td>
+            <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">₦{item.get('price') * item.get('quantity'):,.2f}</td>
+        </tr>
+        """
+
+    html_content = f"""
+    <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; background-color: #f4f4f4; color: #333; padding: 20px; }}
+                .container {{ background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }}
+                h1 {{ color: #ff6900; text-align: center; }}
+                .details {{ text-align: left; background: #F6EEE9; padding: 20px; border-radius: 10px; margin: 20px 0; font-size: 14px; border-left: 4px solid #ff6900; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+                th {{ background-color: #ff6900; color: white; padding: 10px; text-align: left; }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #888; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>JardProc Invoice</h1>
+                <p>Hello <strong>{user_name}</strong>,</p>
+                <p>Thank you for shopping on JardProc Store! We have successfully processed your order and payment.</p>
+                
+                <div class="details">
+                    <p><strong>Order ID:</strong> #{order_id}</p>
+                    <p><strong>Delivery Address:</strong> {address}</p>
+                </div>
+                
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Item</th>
+                            <th style="text-align: right;">Price</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {items_html}
+                        <tr>
+                            <td style="padding: 10px; font-weight: bold;">Grand Total</td>
+                            <td style="padding: 10px; text-align: right; font-weight: bold; color: #ff6900;">₦{total_amount:,.2f}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <p style="margin-top: 20px; text-align: center;">You can track this order in real-time inside your mobile application.</p>
+                <div class="footer">© {datetime.now().year} JardProc Store. All rights reserved.</div>
+            </div>
+        </body>
+    </html>
+    """
+    message.attach(MIMEText(html_content, "html"))
+
+    try:
+        server = get_smtp_connection()
+        server.send_message(message)
+        server.quit()
+        print(f"SUCCESS: Invoice Email sent successfully to {receiver_email}")
+    except Exception as e:
+        print("ERROR sending invoice email:", e)

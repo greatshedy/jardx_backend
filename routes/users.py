@@ -12,7 +12,7 @@ import logging
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import os
-from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, VendorRegister, PartnerRegister
+from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, JardAccount
 import shutil
 import time
 
@@ -21,7 +21,7 @@ logger = logging.getLogger("jardx")
 router = APIRouter(prefix="/users", tags=["Users"])
 
 @router.post("/vendor-register")
-async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token)):
+async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
     try:
         user_id = data["id"]
         user_data = user_collection.find_one({"_id": user_id})
@@ -29,40 +29,30 @@ async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
             
-        # Check balance
-        if user_data.get("wallet_balance", 0) < 25000:
+        fee = 25000
+        if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
             
-        # Upload images to Cloudinary
-        photo_url = ""
-        cert_url = ""
-        
-        if vendor.photo:
-            photo_url = upload_to_cloudinary(vendor.photo, f"vendors/photos/{user_id}")
+        photo_url = upload_to_cloudinary(vendor.photo, f"vendors/photos/{user_id}")
+        cert_url = upload_to_cloudinary(vendor.certificate, f"vendors/certs/{user_id}")
             
-        if vendor.certificate:
-            cert_url = upload_to_cloudinary(vendor.certificate, f"vendors/certs/{user_id}")
-            
-        # Prepare vendor record
         vendor_record = vendor.dict()
         vendor_record["user_id"] = user_id
         vendor_record["photo"] = photo_url
         vendor_record["certificate"] = cert_url
+        vendor_record["accountType"] = "vendor" # Ensure correct type
         vendor_record["status"] = "unverified"
         vendor_record["created_at"] = datetime.datetime.utcnow().isoformat()
         
-        # Save to database
         vendors_collection.insert_one(vendor_record)
         
-        # Deduct fee
-        new_balance = float(user_data["wallet_balance"]) - 25000
+        new_balance = float(user_data["wallet_balance"]) - fee
         user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
         
-        # Record transaction
         transactions_collection.insert_one({
             "tx_ref": f"VNDR-{secrets.token_hex(6).upper()}",
             "user_id": user_id,
-            "amount": 25000.0,
+            "amount": float(fee),
             "type": "DEBIT",
             "purpose": "Vendor Registration Fee",
             "status": "SUCCESS",
@@ -70,7 +60,6 @@ async def vendor_register(vendor: VendorRegister, data: dict = Depends(get_token
         })
         
         return JSONResponse({"message": "Registration successful", "status": 200})
-        
     except Exception as e:
         logger.error(f"Error in /vendor-register: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
@@ -119,7 +108,7 @@ async def update_vendor_photo(payload: dict, data: dict = Depends(get_token)):
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
 @router.post("/partner-register")
-async def partner_register(partner: PartnerRegister, data: dict = Depends(get_token)):
+async def partner_register(partner: JardAccount, data: dict = Depends(get_token)):
     try:
         user_id = data["id"]
         user_data = user_collection.find_one({"_id": user_id})
@@ -127,30 +116,21 @@ async def partner_register(partner: PartnerRegister, data: dict = Depends(get_to
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
             
-        # Check balance
         fee = 100000
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
             
-        # Upload images to Cloudinary
-        photo_url = ""
-        cert_url = ""
-        
-        if partner.photo:
-            photo_url = upload_to_cloudinary(partner.photo, f"partners/photos/{user_id}")
+        photo_url = upload_to_cloudinary(partner.photo, f"partners/photos/{user_id}")
+        cert_url = upload_to_cloudinary(partner.certificate, f"partners/certs/{user_id}")
             
-        if partner.certificate:
-            cert_url = upload_to_cloudinary(partner.certificate, f"partners/certs/{user_id}")
-            
-        # Prepare partner record
         partner_record = partner.dict()
         partner_record["user_id"] = user_id
         partner_record["photo"] = photo_url
         partner_record["certificate"] = cert_url
+        partner_record["accountType"] = "partner" # Ensure correct type
         partner_record["status"] = "unverified"
         partner_record["created_at"] = datetime.datetime.utcnow().isoformat()
         
-        # Save to database
         partners_collection.insert_one(partner_record)
         
         # Update user status

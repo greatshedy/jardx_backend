@@ -1,22 +1,65 @@
-from fastapi import APIRouter, File, UploadFile, Form
+from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException
+from typing import List
 from model import House, JardKidzPlan
-from db.database import house_collection, jard_kidz_collection, user_collection, transactions_collection
 from fastapi.responses import JSONResponse
 from starlette import status
-from utill import chunk_base64_string,reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary
+from utill import get_token, chunk_base64_string, reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary
 
 import logging
 import os
 import secrets
 import json
-
+import datetime
+from db.database import house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection
 
 logger = logging.getLogger("jardx")
 
-router = APIRouter(prefix="/admin", tags=["Admin"]) 
+def verify_admin_token(payload: dict = Depends(get_token)):
+    """
+    Decodes the JWT token and verifies that the logged-in email is strictly the admin email.
+    """
+    try:
+        user_id = payload.get("id")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: User ID missing"
+            )
+        
+        # Look up user in database
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Administrator account not found"
+            )
+        
+        email = user.get("email", "").lower()
+        admin_email = "jarvadgroup.business@gmail.com".lower()
+        
+        if email != admin_email:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access Denied: You do not have administrator privileges"
+            )
+            
+        return user
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error in verify_admin_token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed"
+        )
+
+router = APIRouter(
+    prefix="/admin", 
+    tags=["Admin"],
+    dependencies=[Depends(verify_admin_token)]
+)
 
 def save_house_image(file: UploadFile):
-    # Check file size (e.g., 500KB limit for Cloudinary optimized images)
     file.file.seek(0, os.SEEK_END)
     file_size = file.file.tell()
     file.file.seek(0)
@@ -367,4 +410,258 @@ async def reject_transaction(tx_ref: str):
         return JSONResponse({"message": "Transaction rejected", "status": 200})
     except Exception as e:
         logger.error(f"Error rejecting transaction {tx_ref}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+# --- JARDPROC MANAGEMENT ---
+
+def save_product_image(file: UploadFile):
+    contents = file.file.read()
+    url = upload_to_cloudinary(contents, folder="products")
+    return url
+
+@router.post("/add-product")
+async def add_product(
+    name: str = Form(...),
+    description: str = Form(...),
+    price: float = Form(...),
+    category: str = Form(...),
+    stock: int = Form(...),
+    images: List[UploadFile] = File(...),
+    volume_value: str = Form(None),
+    volume_unit: str = Form(None),
+    variants: str = Form(None)
+):
+    try:
+        image_urls = []
+        for img in images:
+            url = save_product_image(img)
+            image_urls.append(url)
+            
+        volume_val = None
+        if volume_value and volume_value.strip():
+            try:
+                volume_val = float(volume_value)
+            except ValueError:
+                pass
+            
+        data = {
+            "name": name,
+            "description": description,
+            "price": price,
+            "category": category,
+            "stock": stock,
+            "image": image_urls, # Storing as a list
+            "status": "In Stock" if stock > 0 else "Out of Stock",
+            "volume_value": volume_val,
+            "volume_unit": volume_unit if volume_unit else None,
+            "variants": json.loads(variants) if variants and variants.strip() else [],
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        from db.database import products_collection
+        products_collection.insert_one(data)
+        return JSONResponse({"message": "Product added successfully", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.get("/get-all-orders")
+async def get_all_orders():
+    try:
+        from db.database import orders_collection
+        orders = list(orders_collection.find({}).sort({"created_at": -1}))
+        for o in orders:
+            o["_id"] = str(o["_id"])
+            # Fetch user info
+            user = user_collection.find_one({"_id": o["user_id"]}, projection={"user_name": 1, "email": 1})
+            if user:
+                o["user_info"] = user
+        return JSONResponse({"message": "Orders fetched", "data": orders, "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.patch("/update-order-status/{order_id}")
+async def update_order_status(order_id: str, data: dict):
+    try:
+        from db.database import orders_collection
+        new_status = data.get("status")
+        orders_collection.update_one({"order_id": order_id}, {"$set": {"status": new_status}})
+        
+        # Trigger notification logic here later
+        logger.info(f"Admin updated order {order_id} status to {new_status}")
+        return JSONResponse({"message": "Order status updated", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/bulk-upload-products")
+async def bulk_upload_products(file: UploadFile = File(...)):
+    try:
+        import csv
+        import io
+        from db.database import products_collection
+        
+        content = await file.read()
+        decode_content = content.decode('utf-8')
+        f = io.StringIO(decode_content)
+        reader = csv.DictReader(f)
+        
+        products = []
+        for row in reader:
+            products.append({
+                "name": row["name"],
+                "description": row["description"],
+                "price": float(row["price"]),
+                "category": row["category"],
+                "stock": int(row["stock"]),
+                "image": row.get("image", ""), # Can be a placeholder URL
+                "status": "In Stock" if int(row["stock"]) > 0 else "Out of Stock",
+                "created_at": datetime.datetime.utcnow().isoformat()
+            })
+            
+        if products:
+            products_collection.insert_many(products)
+            
+        return JSONResponse({"message": f"Successfully uploaded {len(products)} products", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.put("/update-product/{product_id}")
+async def update_product(
+    product_id: str,
+    name: str = Form(None),
+    description: str = Form(None),
+    price: float = Form(None),
+    category: str = Form(None),
+    stock: int = Form(None),
+    existing_images: str = Form(None),
+    images: List[UploadFile] = File(None),
+    volume_value: str = Form(None),
+    volume_unit: str = Form(None),
+    variants: str = Form(None)
+):
+    try:
+        update_data = {}
+        if name: update_data["name"] = name
+        if description: update_data["description"] = description
+        if price is not None: update_data["price"] = price
+        if category: update_data["category"] = category
+        if stock is not None: 
+            update_data["stock"] = stock
+            update_data["status"] = "In Stock" if stock > 0 else "Out of Stock"
+            
+        if volume_value is not None:
+            if volume_value.strip():
+                try:
+                    update_data["volume_value"] = float(volume_value)
+                except ValueError:
+                    update_data["volume_value"] = None
+            else:
+                update_data["volume_value"] = None
+                
+        if volume_unit is not None:
+            update_data["volume_unit"] = volume_unit if volume_unit.strip() else None
+            
+        if variants is not None:
+            update_data["variants"] = json.loads(variants) if variants.strip() else []
+        
+        # Handle images
+        final_images = []
+        if existing_images:
+            final_images = json.loads(existing_images)
+            
+        if images:
+            for img in images:
+                url = save_product_image(img)
+                final_images.append(url)
+        
+        if final_images:
+            update_data["image"] = final_images
+            
+        from db.database import products_collection
+        products_collection.update_one({"_id": product_id}, {"$set": update_data})
+        return JSONResponse({"message": "Product updated successfully", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.delete("/delete-product/{product_id}")
+async def delete_product(product_id: str):
+    try:
+        from db.database import products_collection
+        # Find product to delete image from cloudinary if needed
+        product = products_collection.find_one({"_id": product_id})
+        if product and "cloudinary" in product.get("image", ""):
+            delete_from_cloudinary(product["image"])
+            
+        products_collection.delete_one({"_id": product_id})
+        return JSONResponse({"message": "Product deleted successfully", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+# --- PARTNER & VENDOR MANAGEMENT ---
+
+@router.get("/partners-list")
+async def get_partners_list(type: str = "partner"):
+    try:
+        from db.database import vendors_collection, partners_collection, user_collection
+        # type can be 'vendor' or 'partner'
+        if type == 'vendor':
+            data = list(vendors_collection.find({}))
+            logger.info(f"Admin fetched {len(data)} vendors")
+        else:
+            data = list(partners_collection.find({}))
+            logger.info(f"Admin fetched {len(data)} partners")
+            
+        for item in data:
+            item["_id"] = str(item["_id"])
+            # Fetch user info for display if user_id exists
+            user_id = item.get("user_id")
+            if user_id:
+                user = user_collection.find_one({"_id": user_id}, projection={"user_name": 1, "email": 1, "phone": 1})
+                if user:
+                    item["user_info"] = user
+                
+        return JSONResponse({"message": "Data fetched", "data": data, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching partners-list: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.patch("/verify-account/{account_id}")
+async def verify_account(account_id: str, data: dict):
+    try:
+        from db.database import vendors_collection, partners_collection
+        acc_type = data.get("type") # 'vendor' or 'partner'
+        new_status = data.get("status") # 'verified', 'rejected', 'unverified'
+        
+        collection = vendors_collection if acc_type == 'vendor' else partners_collection
+        collection.update_one({"_id": account_id}, {"$set": {"status": new_status}})
+        
+        return JSONResponse({"message": f"Account {new_status} successfully", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.delete("/delete-account/{account_id}")
+async def delete_account(account_id: str, type: str):
+    try:
+        from db.database import vendors_collection, partners_collection
+        collection = vendors_collection if type == 'vendor' else partners_collection
+        collection.delete_one({"_id": account_id})
+        return JSONResponse({"message": "Account record deleted", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.get("/get-products")
+async def admin_get_products(category: str = "All"):
+    try:
+        from db.database import products_collection
+        query = {}
+        if category != "All":
+            query = {"category": category}
+            
+        products = list(products_collection.find(query))
+        for p in products:
+            p["_id"] = str(p["_id"])
+            if isinstance(p.get("image"), list):
+                p["image"] = [get_image_url(img) for img in p["image"]]
+            else:
+                p["image"] = get_image_url(p.get("image"))
+        return JSONResponse({"message": "Products fetched", "data": products, "status": 200})
+    except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})

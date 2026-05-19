@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
-from routes import users, admin, payment, finance, portfolio
+from routes import users, admin, payment, finance, portfolio, jardproc
 
 # Use absolute path to ensure .env is loaded
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +23,18 @@ logging.basicConfig(
 logger = logging.getLogger("jardx")
 
 app = FastAPI()
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.error(f"Validation error for {request.url}: {exc.errors()}")
+    body_repr = str(exc.body) if exc.body else None
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": body_repr}
+    )
 
 @app.get("/")
 async def root():
@@ -71,6 +83,7 @@ app.include_router(admin.router)
 app.include_router(payment.router)
 app.include_router(finance.router)
 app.include_router(portfolio.router)
+app.include_router(jardproc.router)
 
 # --- Keep-Alive & Health Check Logic ---
 @app.get("/health")
