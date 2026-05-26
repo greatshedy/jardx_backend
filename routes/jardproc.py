@@ -16,14 +16,50 @@ async def get_products(category: str = "All"):
             query = {"category": category}
         
         products = list(products_collection.find(query))
+        
+        all_reviews = list(reviews_collection.find({}))
+        rating_map = {}
+        for r in all_reviews:
+            pid = r.get("product_id")
+            if pid not in rating_map:
+                rating_map[pid] = {"total": 0, "sum": 0}
+            rating_map[pid]["total"] += 1
+            rating_map[pid]["sum"] += int(r.get("rating", 0))
+        
         for p in products:
-            p["_id"] = str(p["_id"])
+            pid = str(p["_id"])
+            if pid in rating_map:
+                p["rating"] = round(rating_map[pid]["sum"] / rating_map[pid]["total"], 1)
+                p["reviews"] = rating_map[pid]["total"]
+            else:
+                p["rating"] = None
+                p["reviews"] = None
+            
             if isinstance(p.get("image"), list):
                 p["image"] = [get_image_url(img) for img in p["image"]]
             else:
                 p["image"] = get_image_url(p.get("image"))
             
         return JSONResponse({"message": "Products fetched", "data": products, "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.get("/products/{product_id}/rating")
+async def get_product_rating(product_id: str):
+    try:
+        reviews = list(reviews_collection.find({"product_id": product_id}))
+        total = len(reviews)
+        distribution = {5: 0, 4: 0, 3: 0, 2: 0, 1: 0}
+        total_rating = 0
+        for r in reviews:
+            star = int(r.get("rating", 0))
+            distribution[star] = distribution.get(star, 0) + 1
+            total_rating += star
+        average = round(total_rating / total, 1) if total > 0 else 0
+        return JSONResponse({
+            "data": {"average": average, "total": total, "distribution": distribution},
+            "status": 200
+        })
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
 
@@ -161,5 +197,40 @@ async def get_product_reviews(product_id: str):
         for r in reviews:
             r["_id"] = str(r["_id"])
         return JSONResponse({"message": "Reviews fetched", "data": reviews, "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.put("/reviews/{review_id}")
+async def update_review(review_id: str, review: dict, user_payload: dict = Depends(get_token)):
+    try:
+        user_id = user_payload.get("id")
+        existing = reviews_collection.find_one({"_id": review_id})
+        if not existing:
+            return JSONResponse({"message": "Review not found", "status": 404})
+        if str(existing.get("user_id")) != str(user_id):
+            return JSONResponse({"message": "You can only edit your own review", "status": 403})
+        
+        updates = {
+            "rating": int(review.get("rating")),
+            "comment": review.get("comment"),
+            "updated_at": datetime.datetime.utcnow().isoformat()
+        }
+        reviews_collection.update_one({"_id": review_id}, {"$set": updates})
+        return JSONResponse({"message": "Review updated successfully", "status": 200})
+    except Exception as e:
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.delete("/reviews/{review_id}")
+async def delete_review(review_id: str, user_payload: dict = Depends(get_token)):
+    try:
+        user_id = user_payload.get("id")
+        existing = reviews_collection.find_one({"_id": review_id})
+        if not existing:
+            return JSONResponse({"message": "Review not found", "status": 404})
+        if str(existing.get("user_id")) != str(user_id):
+            return JSONResponse({"message": "You can only delete your own review", "status": 403})
+        
+        reviews_collection.delete_one({"_id": review_id})
+        return JSONResponse({"message": "Review deleted successfully", "status": 200})
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
