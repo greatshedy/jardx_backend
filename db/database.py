@@ -3,6 +3,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from astrapy import DataAPIClient
+from astrapy.api_options import APIOptions, TimeoutOptions
 from dotenv import load_dotenv
 import os
 from model import User, Login, JardAccount
@@ -19,8 +20,15 @@ load_dotenv(os.path.join(backend_dir, ".env"))
 db_token=os.getenv("DB_TOKEN")
 db_url=os.getenv("DB_URL")
 
-# Initialize the client
-client = DataAPIClient(db_token)
+# Initialize the client with increased timeout
+client = DataAPIClient(
+    db_token,
+    api_options=APIOptions(
+        timeout_options=TimeoutOptions(
+            request_timeout_ms=30000,
+        ),
+    ),
+)
 db = client.get_database_by_api_endpoint(db_url)
 
 # Access collections
@@ -66,5 +74,10 @@ if "reviews" not in existing_collections:
     reviews_collection = db.create_collection("reviews")
 else:
     reviews_collection = db.get_collection("reviews")
+
+if "notifications" not in existing_collections:
+    notifications_collection = db.create_collection("notifications")
+else:
+    notifications_collection = db.get_collection("notifications")
 
 print("Astra DB connection initialized successfully.")

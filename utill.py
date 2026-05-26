@@ -603,6 +603,10 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
 def process_referral_logic(user_id, amount, user_collection, transactions_collection):
     """
     Handles referral activation for the current user and bonus distribution for the referrer.
+    
+    Tiers:
+      - #5k – #49k: 2% referral link (no self-bonus)
+      - #50k+:      5% referral link + 10% instant self-bonus on first deposit
     """
     # Ensure ID is a string for Astra DB lookup consistency
     uid_str = str(user_id)
@@ -613,19 +617,38 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
     # 1. Handle Activation (One-time based on first qualifying payment)
     if not user.get("is_referral_active", False):
         percentage = 0.0
-        if amount >= 100000:
-            percentage = 10.0
-        elif amount >= 50000:
+        if amount >= 50000:
             percentage = 5.0
         elif amount >= 5000:
             percentage = 2.0
         
         if percentage > 0:
+            updates = {"is_referral_active": True, "referral_percentage": percentage}
             user_collection.update_one(
                 {"_id": user_id}, 
-                {"$set": {"is_referral_active": True, "referral_percentage": percentage}}
+                {"$set": updates}
             )
             print(f"DEBUG: Referral activated for {user_id} with {percentage}%")
+            
+            # Self-bonus: 10% instant credit for #50k+ first deposit
+            if amount >= 50000:
+                self_bonus = amount * 0.10
+                new_balance = float(user.get("wallet_balance", 0.0)) + self_bonus
+                user_collection.update_one(
+                    {"_id": user_id},
+                    {"$set": {"wallet_balance": new_balance}}
+                )
+                transactions_collection.insert_one({
+                    "tx_ref": f"REF-SELF-{secrets.token_hex(4).upper()}",
+                    "user_id": uid_str,
+                    "amount": self_bonus,
+                    "gateway": "Referral System",
+                    "type": "CREDIT",
+                    "purpose": f"Referral Self-Bonus: First deposit #${amount:,.0f}",
+                    "status": "SUCCESS",
+                    "created_at": datetime.utcnow().isoformat()
+                })
+                print(f"DEBUG: Self-bonus of {self_bonus} (10%) credited to {user_id}")
 
     # 2. Handle Bonus for the Referrer (Only on the FIRST deposit)
     referrer_id = user.get("referred_by")
@@ -742,3 +765,55 @@ def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amoun
         print(f"SUCCESS: Invoice Email sent successfully to {receiver_email}")
     except Exception as e:
         print("ERROR sending invoice email:", e)
+
+
+def send_push_notification_to_user(user_doc: dict, title: str, body: str, data_payload: dict = None):
+    """
+    Sends an Expo push notification to a user if they have enabled notifications
+    and have a valid push token.
+    Supports rich notifications with image attachments by passing an 'image' key inside data_payload.
+    """
+    try:
+        import requests
+        import json
+        
+        # Check push token and if push notification setting is enabled
+        push_token = user_doc.get("push_token")
+        settings = user_doc.get("notification_settings", {})
+        
+        # Guard push-send logic: skip if no token or if the push setting is false
+        if not push_token:
+            return False
+            
+        if not settings.get("push", False):
+            # User has not toggled push notifications on
+            return False
+            
+        payload = {
+            "to": push_token,
+            "title": title,
+            "body": body,
+            "data": data_payload or {}
+        }
+        
+        # If an image URL is in the data payload, support rich previews (iOS & Android)
+        if data_payload and "image" in data_payload and data_payload["image"]:
+            image_url = data_payload["image"]
+            payload["mutableContent"] = True
+            # Support richContent.image for Android/some platforms
+            payload["richContent"] = {"image": image_url}
+            
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        url = "https://exp.host/--/api/v2/push/send"
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        
+        # Return success status
+        return response.status_code == 200
+    except Exception as e:
+        print("ERROR sending push notification:", e)
+        return False
+

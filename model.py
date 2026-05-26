@@ -1,4 +1,4 @@
-from pydantic import BaseModel,EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
 class BankAccount(BaseModel):
     id: str = ""
@@ -22,6 +22,13 @@ class User(BaseModel):
     referral_percentage: float = 0.0
     referral_bonus_paid: bool = False
     bank_accounts: list[BankAccount] = []
+
+    @field_validator("bank_accounts", mode="before")
+    @classmethod
+    def validate_bank_accounts(cls, v):
+        if v == "" or v is None:
+            return []
+        return v
 
 
 class Login(BaseModel):

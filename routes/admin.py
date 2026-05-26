@@ -110,6 +110,45 @@ async def add_house(
         
         logger.info(f"Adding house: {house_name}")
         house_collection.insert_one(data)   
+
+        # Notify users who have enabled push notifications and store in-app notifications
+        try:
+            from utill import send_push_notification_to_user, get_image_url
+            from db.database import notifications_collection
+            import datetime
+            
+            first_image = get_image_url(new_image_urls[0]) if new_image_urls else ""
+            all_users = list(user_collection.find({}))
+            
+            # Save in-app notification records for all users so it displays on their screen
+            in_app_notifs = []
+            for u in all_users:
+                u_id = str(u["_id"])
+                in_app_notifs.append({
+                    "user_id": u_id,
+                    "title": "New Real Estate Listed! 🏡",
+                    "body": f"A premium property '{house_name}' is now available in {house_location}.",
+                    "type": "ESTATE",
+                    "action_text": "View",
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "is_read": False,
+                    "image": first_image
+                })
+            if in_app_notifs:
+                notifications_collection.insert_many(in_app_notifs)
+                
+            # Deliver physical push notification to eligible devices
+            for u in all_users:
+                if u.get("push_token") and (u.get("notification_settings") or {}).get("push", False):
+                    send_push_notification_to_user(
+                        user_doc=u,
+                        title="New Real Estate Listed! 🏡",
+                        body=f"A premium property '{house_name}' is now available in {house_location}.",
+                        data_payload={"screen": "notifications", "image": first_image}
+                    )
+        except Exception as push_err:
+            logger.error(f"Failed to send add-house push notifications: {push_err}")
+
         return JSONResponse({"message": "House added successfully", "status": status.HTTP_200_OK})
     except Exception as e:
         logger.error(f"Error adding house: {e}")
@@ -459,6 +498,45 @@ async def add_product(
         }
         from db.database import products_collection
         products_collection.insert_one(data)
+
+        # Notify users who have enabled push notifications and store in-app notifications
+        try:
+            from utill import send_push_notification_to_user, get_image_url
+            from db.database import notifications_collection
+            import datetime
+            
+            first_image = get_image_url(image_urls[0]) if image_urls else ""
+            all_users = list(user_collection.find({}))
+            
+            # Save in-app notification records for all users so it displays on their screen
+            in_app_notifs = []
+            for u in all_users:
+                u_id = str(u["_id"])
+                in_app_notifs.append({
+                    "user_id": u_id,
+                    "title": "New Product Alert! 🛍️",
+                    "body": f"We just added '{name}' to our store. Check it out now!",
+                    "type": "PRODUCT",
+                    "action_text": "View",
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "is_read": False,
+                    "image": first_image
+                })
+            if in_app_notifs:
+                notifications_collection.insert_many(in_app_notifs)
+                
+            # Deliver physical push notification to eligible devices
+            for u in all_users:
+                if u.get("push_token") and (u.get("notification_settings") or {}).get("push", False):
+                    send_push_notification_to_user(
+                        user_doc=u,
+                        title="New Product Alert! 🛍️",
+                        body=f"We just added '{name}' to our store. Check it out now!",
+                        data_payload={"screen": "notifications", "image": first_image}
+                    )
+        except Exception as push_err:
+            logger.error(f"Failed to send add-product push notifications: {push_err}")
+
         return JSONResponse({"message": "Product added successfully", "status": 200})
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
@@ -538,6 +616,14 @@ async def update_product(
     variants: str = Form(None)
 ):
     try:
+        # Fetch the product from db to get current name and image details
+        from db.database import products_collection
+        product = products_collection.find_one({"_id": product_id})
+        if not product:
+            return JSONResponse({"message": "Product not found", "status": 404})
+            
+        prod_name = name if name else product.get("name", "Product")
+        
         update_data = {}
         if name: update_data["name"] = name
         if description: update_data["description"] = description
@@ -575,8 +661,53 @@ async def update_product(
         if final_images:
             update_data["image"] = final_images
             
-        from db.database import products_collection
         products_collection.update_one({"_id": product_id}, {"$set": update_data})
+        
+        # Determine the first image URL to attach to notifications
+        first_image = ""
+        if final_images:
+            first_image = final_images[0]
+        elif product.get("image"):
+            first_image = product["image"][0] if isinstance(product["image"], list) else product["image"]
+            
+        # Notify users of the product update and save to notifications_collection
+        try:
+            from utill import send_push_notification_to_user, get_image_url
+            from db.database import user_collection, notifications_collection
+            import datetime
+            
+            resolved_image = get_image_url(first_image) if first_image else ""
+            all_users = list(user_collection.find({}))
+            
+            # Save in-app notification records for all users so it displays on their screen
+            in_app_notifs = []
+            for u in all_users:
+                u_id = str(u["_id"])
+                in_app_notifs.append({
+                    "user_id": u_id,
+                    "title": "Product Updated! 🛍️",
+                    "body": f"The product '{prod_name}' has been updated with new details.",
+                    "type": "PRODUCT",
+                    "action_text": "View",
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "is_read": False,
+                    "image": resolved_image
+                })
+            if in_app_notifs:
+                notifications_collection.insert_many(in_app_notifs)
+                
+            # Deliver physical push notification to eligible devices
+            for u in all_users:
+                if u.get("push_token") and (u.get("notification_settings") or {}).get("push", False):
+                    send_push_notification_to_user(
+                        user_doc=u,
+                        title="Product Updated! 🛍️",
+                        body=f"The product '{prod_name}' has been updated with new details.",
+                        data_payload={"screen": "notifications", "image": resolved_image}
+                    )
+        except Exception as push_err:
+            logger.error(f"Failed to send update-product push notifications: {push_err}")
+            
         return JSONResponse({"message": "Product updated successfully", "status": 200})
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
