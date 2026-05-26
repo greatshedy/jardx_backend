@@ -1544,7 +1544,7 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
             "type": "DEBIT",
             "purpose": f"JardKidz Plan Top-Up: {plan['child_name']} ({months_to_pay} months)",
             "status": "SUCCESS",
-            "created_at": datetime.datetime.now(datetime.timezone.utc)
+            "created_at": datetime.datetime.utcnow().isoformat()
         }
         transactions_collection.insert_one(transaction)
 
