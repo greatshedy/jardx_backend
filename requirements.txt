@@ -14,3 +14,4 @@ pydantic[email]
 python-dateutil
 redis
 cloudinary
+httpx
