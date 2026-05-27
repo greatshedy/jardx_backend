@@ -600,7 +600,7 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
         print("ERROR sending wallet credit email:", e)
 
 
-def process_referral_logic(user_id, amount, user_collection, transactions_collection):
+def process_referral_logic(user_id, amount, user_collection, transactions_collection, give_referrer_bonus=True):
     """
     Handles referral activation for the current user and bonus distribution for the referrer.
     
@@ -654,7 +654,7 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
     referrer_id = user.get("referred_by")
     bonus_already_paid = user.get("referral_bonus_paid", False)
     
-    if referrer_id and not bonus_already_paid:
+    if give_referrer_bonus and referrer_id and not bonus_already_paid:
         # Resolve referrer
         referrer = user_collection.find_one({"_id": referrer_id})
         if referrer and referrer.get("is_referral_active"):
@@ -687,6 +687,82 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
                     {"_id": uid_str}, 
                     {"$set": {"referral_bonus_paid": True}}
                 )
+
+
+def process_partner_commission(user_id, amount, user_collection, transactions_collection):
+    """
+    Gives partner referrers commission on referred users' house payments.
+    - Level 1 (direct): 10% to the direct referrer if they are a partner
+    - Level 2 (indirect): 5% to the grand-referrer if they are a partner
+    """
+    try:
+        amount = float(amount)
+        if amount <= 0:
+            return
+
+        uid_str = str(user_id)
+        user = user_collection.find_one({"_id": uid_str})
+        if not user:
+            return
+
+        referrer_id = user.get("referred_by")
+        if not referrer_id:
+            return
+
+        referrer = user_collection.find_one({"_id": referrer_id})
+        if not referrer:
+            return
+
+        referrer_type = referrer.get("partner_type") or (
+            "partner" if referrer.get("is_partner") else "normal"
+        )
+
+        if referrer_type == "partner":
+            commission = amount * 0.10
+            new_balance = float(referrer.get("wallet_balance", 0)) + commission
+            user_collection.update_one(
+                {"_id": referrer_id},
+                {"$set": {"wallet_balance": new_balance}}
+            )
+            transactions_collection.insert_one({
+                "tx_ref": f"PDC-{secrets.token_hex(4).upper()}",
+                "user_id": str(referrer_id),
+                "amount": commission,
+                "gateway": "Referral System",
+                "type": "CREDIT",
+                "purpose": "Partner Direct Commission",
+                "status": "SUCCESS",
+                "created_at": datetime.utcnow().isoformat()
+            })
+
+            # Level 2: Indirect (grand-referrer)
+            grand_referrer_id = referrer.get("referred_by")
+            if grand_referrer_id:
+                grand_referrer = user_collection.find_one({"_id": grand_referrer_id})
+                if grand_referrer:
+                    grand_type = grand_referrer.get("partner_type") or (
+                        "partner" if grand_referrer.get("is_partner") else "normal"
+                    )
+                    if grand_type == "partner":
+                        indirect = amount * 0.05
+                        new_grand_balance = float(grand_referrer.get("wallet_balance", 0)) + indirect
+                        user_collection.update_one(
+                            {"_id": grand_referrer_id},
+                            {"$set": {"wallet_balance": new_grand_balance}}
+                        )
+                        transactions_collection.insert_one({
+                            "tx_ref": f"PIC-{secrets.token_hex(4).upper()}",
+                            "user_id": str(grand_referrer_id),
+                            "amount": indirect,
+                            "gateway": "Referral System",
+                            "type": "CREDIT",
+                            "purpose": "Partner Indirect Commission",
+                            "status": "SUCCESS",
+                            "created_at": datetime.utcnow().isoformat()
+                        })
+    except Exception as e:
+        logger.error(f"Partner commission error: {e}")
+
 
 def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amount, items, address):
     sender_email = os.getenv("SENDER_EMAIL")

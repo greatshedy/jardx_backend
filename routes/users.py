@@ -50,7 +50,10 @@ async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
         vendors_collection.insert_one(vendor_record)
         
         new_balance = float(user_data["wallet_balance"]) - fee
-        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        user_collection.update_one({"_id": user_id}, {"$set": {
+            "wallet_balance": new_balance,
+            "partner_type": "vendor"
+        }})
         
         transactions_collection.insert_one({
             "tx_ref": f"VNDR-{secrets.token_hex(6).upper()}",
@@ -344,7 +347,10 @@ async def partner_register(partner: JardAccount, data: dict = Depends(get_token)
         partners_collection.insert_one(partner_record)
         
         # Update user status
-        user_collection.update_one({"_id": user_id}, {"$set": {"is_partner": True}})
+        user_collection.update_one({"_id": user_id}, {"$set": {
+            "is_partner": True,
+            "partner_type": "partner"
+        }})
         
         # Deduct fee
         new_balance = float(user_data["wallet_balance"]) - fee
@@ -896,6 +902,8 @@ async def Home(data: dict = Depends(get_token)):
             updates["is_referral_active"] = False
         if "referral_percentage" not in user_data:
             updates["referral_percentage"] = 0.0
+        if "partner_type" not in user_data:
+            updates["partner_type"] = "partner" if user_data.get("is_partner") else "normal"
             
         if updates:
             user_collection.update_one({"_id": user_id}, {"$set": updates})
@@ -942,6 +950,18 @@ async def Home(data: dict = Depends(get_token)):
                     if "referral bonus" in str(tx.get("purpose", "")).lower()
                 )
                 
+                # Partner commission earnings
+                partner_direct_earned = sum(
+                    float(tx.get("amount", 0))
+                    for tx in all_credits
+                    if tx.get("purpose") == "Partner Direct Commission"
+                )
+                partner_indirect_earned = sum(
+                    float(tx.get("amount", 0))
+                    for tx in all_credits
+                    if tx.get("purpose") == "Partner Indirect Commission"
+                )
+                
                 # Filter withdrawals for referral-specific ones if any, 
                 # or just show total referral bonus withdrawals.
                 # If they withdraw from main wallet, we usually track it by purpose.
@@ -957,6 +977,8 @@ async def Home(data: dict = Depends(get_token)):
                 total_referrals = 0
                 total_earned = 0
                 total_withdrawn = 0
+                partner_direct_earned = 0
+                partner_indirect_earned = 0
 
         user_data["referral_info"] = {
             "code": user_data.get("referral_code", ""),
@@ -964,7 +986,10 @@ async def Home(data: dict = Depends(get_token)):
             "percentage": user_data.get("referral_percentage", 0.0),
             "total_referrals": total_referrals,
             "total_earned": total_earned,
-            "total_withdrawn": total_withdrawn
+            "total_withdrawn": total_withdrawn,
+            "partner_type": user_data.get("partner_type", "normal"),
+            "partner_direct_earned": partner_direct_earned,
+            "partner_indirect_earned": partner_indirect_earned
         }
 
         return JSONResponse(

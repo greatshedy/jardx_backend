@@ -21,6 +21,7 @@ class User(BaseModel):
     is_referral_active: bool = False
     referral_percentage: float = 0.0
     referral_bonus_paid: bool = False
+    partner_type: str = "normal"
     bank_accounts: list[BankAccount] = []
 
     @field_validator("bank_accounts", mode="before")

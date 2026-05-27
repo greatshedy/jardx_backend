@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import JSONResponse
 from db.database import user_collection, house_collection, portfolio_collection, transactions_collection
 from model import PropertyPurchase, PortfolioModel
-from utill import get_token, send_purchase_email, reassemble_base64_string, process_referral_logic
+from utill import get_token, send_purchase_email, reassemble_base64_string, process_referral_logic, process_partner_commission
 import datetime
 import secrets
 from dateutil.relativedelta import relativedelta
@@ -148,8 +148,10 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
             image_to_send
         )
 
-        # Process Referral Activation
-        process_referral_logic(user_id, purchase.amount_to_pay, user_collection, transactions_collection)
+        # Process Referral Activation (activation only, no one-time bonus for house buys)
+        process_referral_logic(user_id, purchase.amount_to_pay, user_collection, transactions_collection, give_referrer_bonus=False)
+        # Partner commission (10% direct, 5% indirect for partner referrers)
+        process_partner_commission(user_id, purchase.amount_to_pay, user_collection, transactions_collection)
         
         return JSONResponse(status_code=200, content={"message": "Purchase successful! Your portfolio has been updated."})
         
@@ -390,7 +392,10 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payloa
             new_balance = current_balance - total_due
             user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
 
-            # 4. Send receipt email
+            # 4. Partner commission on installment payments
+            process_partner_commission(user_id, total_due, user_collection, transactions_collection)
+
+            # 5. Send receipt email
             background_tasks.add_task(
                 send_purchase_email,
                 user.get("email"),
