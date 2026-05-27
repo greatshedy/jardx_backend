@@ -229,6 +229,91 @@ async def update_vendor_photo(payload: dict, data: dict = Depends(get_token)):
         logger.error(f"Error in /update-vendor-photo: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
+@router.post("/update-vendor-details")
+async def update_vendor_details(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        vendor_data = vendors_collection.find_one({"user_id": user_id})
+        if not vendor_data:
+            return JSONResponse({"message": "Vendor record not found", "status": 404}, status_code=404)
+        
+        allowed_fields = [
+            "fullName", "phone", "address", "vocation", "profession",
+            "accountNumber", "bankName", "description", "workExperience"
+        ]
+        updates = {}
+        for field in allowed_fields:
+            if field in payload:
+                updates[field] = payload[field]
+                
+        if updates:
+            vendors_collection.update_one({"user_id": user_id}, {"$set": updates})
+            
+        return JSONResponse({"message": "Vendor details updated successfully", "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /update-vendor-details: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/add-vendor-gallery")
+async def add_vendor_gallery(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        photo_base64 = payload.get("photo")
+        if not photo_base64:
+            return JSONResponse({"message": "No photo data provided", "status": 400}, status_code=400)
+            
+        vendor_data = vendors_collection.find_one({"user_id": user_id})
+        if not vendor_data:
+            return JSONResponse({"message": "Vendor record not found", "status": 404}, status_code=404)
+            
+        gallery = vendor_data.get("gallery", [])
+        if len(gallery) >= 4:
+            return JSONResponse({"message": "Maximum of 4 gallery pictures allowed", "status": 400}, status_code=400)
+            
+        # Upload to Cloudinary
+        # Keep gallery files unique per vendor by folder naming
+        photo_url = upload_to_cloudinary(photo_base64, f"vendors/gallery/{user_id}")
+        
+        if not photo_url:
+            return JSONResponse({"message": "Upload failed", "status": 500}, status_code=500)
+            
+        # Duplicate check: check if the exact URL is already in the gallery
+        if photo_url in gallery:
+            return JSONResponse({"message": "This image already exists in your gallery", "status": 400, "url": photo_url}, status_code=400)
+            
+        gallery.append(photo_url)
+        vendors_collection.update_one({"user_id": user_id}, {"$set": {"gallery": gallery}})
+        
+        return JSONResponse({"message": "Gallery image added successfully", "url": photo_url, "gallery": gallery, "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /add-vendor-gallery: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/delete-vendor-gallery")
+async def delete_vendor_gallery(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        photo_url = payload.get("photo_url")
+        if not photo_url:
+            return JSONResponse({"message": "No photo URL provided", "status": 400}, status_code=400)
+            
+        vendor_data = vendors_collection.find_one({"user_id": user_id})
+        if not vendor_data:
+            return JSONResponse({"message": "Vendor record not found", "status": 404}, status_code=404)
+            
+        gallery = vendor_data.get("gallery", [])
+        if photo_url in gallery:
+            gallery.remove(photo_url)
+            # Delete from Cloudinary
+            delete_from_cloudinary(photo_url)
+            vendors_collection.update_one({"user_id": user_id}, {"$set": {"gallery": gallery}})
+            
+        return JSONResponse({"message": "Gallery image deleted successfully", "gallery": gallery, "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /delete-vendor-gallery: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
 @router.post("/partner-register")
 async def partner_register(partner: JardAccount, data: dict = Depends(get_token)):
     try:
@@ -425,6 +510,31 @@ async def update_partner_photo(payload: dict, data: dict = Depends(get_token)):
         return JSONResponse({"message": "Photo updated successfully", "url": photo_url, "status": 200}, status_code=200)
     except Exception as e:
         logger.error(f"Error in /update-partner-photo: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/update-partner-details")
+async def update_partner_details(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        partner_data = partners_collection.find_one({"user_id": user_id})
+        if not partner_data:
+            return JSONResponse({"message": "Partner record not found", "status": 404}, status_code=404)
+        
+        allowed_fields = [
+            "fullName", "phone", "address", "skills", "profession",
+            "accountNumber", "bankName", "description", "workExperience"
+        ]
+        updates = {}
+        for field in allowed_fields:
+            if field in payload:
+                updates[field] = payload[field]
+                
+        if updates:
+            partners_collection.update_one({"user_id": user_id}, {"$set": updates})
+            
+        return JSONResponse({"message": "Partner details updated successfully", "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /update-partner-details: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
 
