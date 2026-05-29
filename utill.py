@@ -449,6 +449,7 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
     child_name = plan_details.get("child_name", "your child")
     plan_type_raw = plan_details.get("plan_type", "child_savings")
     plan_type = "Property Plan" if plan_type_raw == "child_property" else "Savings Plan"
+    sub_type = "property" if plan_type_raw == "child_property" else "savings"
     amount = float(plan_details.get("amount_paid", 0))
     months_paid = plan_details.get("months_paid", 1)
     total_months = plan_details.get("total_months", 0)
@@ -510,9 +511,9 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
                     <p>Thank you for choosing <strong>JardX</strong> to secure your child's future. You can track this progress in real-time on your dashboard.</p>
                 </div>
                 <!-- Deep Link via Web Bridge: Gmail blocks custom schemes; the bridge page silently redirects to jardx:// -->
-                <a href="{os.getenv('MOBILE_URL', '#')}?autoOpen=true&type=kidz&name={child_name}" class="cta">Open in JardX App</a>
+                <a href="{os.getenv('MOBILE_URL', '#')}?autoOpen=true&type=kidz&sub_type={sub_type}&name={child_name}" class="cta">Open in JardX App</a>
                 <p style="text-align: center; margin-top: 10px;">
-                    <a href="{os.getenv('MOBILE_URL', '#')}?type=kidz&name={child_name}" style="color: #ff6900; font-size: 14px; text-decoration: none;">View in Browser</a>
+                    <a href="{os.getenv('MOBILE_URL', '#')}?type=kidz&sub_type={sub_type}&name={child_name}" style="color: #ff6900; font-size: 14px; text-decoration: none;">View in Browser</a>
                 </p>
                 <div class="footer">
                     <p>© {datetime.now().year} JardX Technologies. All rights reserved.</p>

@@ -3,7 +3,7 @@ import time
 import threading
 import requests
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,7 +25,7 @@ logger = logging.getLogger("jardx")
 app = FastAPI()
 
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -36,8 +36,47 @@ async def validation_exception_handler(request, exc):
         content={"detail": exc.errors(), "body": body_repr}
     )
 
+def generate_app_redirect(params):
+    type_ = params.get("type", "")
+    sub_type = params.get("sub_type", "")
+    name = params.get("name", "")
+    amount = params.get("amount", "")
+    auto_open = params.get("autoOpen") == "true"
+
+    if type_ in ("kidz", "savings"):
+        path = f"open?type={type_}&sub_type={sub_type}&name={name}"
+    elif type_ == "payment":
+        path = f"open?type=payment&amount={amount}"
+    else:
+        path = "open"
+
+    redirect_url = f"jardx://{path}"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Opening JardX...</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f8fafc;color:#1e293b;text-align:center;padding:20px}}
+.card{{background:#fff;padding:40px;border-radius:20px;box-shadow:0 10px 15px -3px rgba(0,0,0,.1);max-width:400px;width:100%}}
+h2{{margin:0 0 10px 0}}p{{color:#64748b;margin-bottom:20px;line-height:1.5}}
+.btn{{display:inline-block;background:#FF6900;color:#fff;padding:16px 32px;border-radius:12px;text-decoration:none;font-weight:bold}}
+.btn:hover{{opacity:.9}}
+.loader{{border:3px solid #f3f3f3;border-top:3px solid #FF6900;border-radius:50%;width:24px;height:24px;animation:spin 1s linear infinite;display:inline-block;vertical-align:middle;margin-right:10px}}
+@keyframes spin{{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}
+</style></head><body><div class="card">
+<h2>Opening JardX...</h2>
+<p>You are being redirected to the JardX app.</p>
+<a href="{redirect_url}" class="btn"><div class="loader"></div>Open JardX App</a>
+</div>
+<script>{"setTimeout(function(){window.location.href='" + redirect_url + "'},1000)" if auto_open else ""}</script>
+</body></html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/")
-async def root():
+async def root(request: Request):
+    params = request.query_params
+    if params.get("type") or params.get("autoOpen"):
+        return generate_app_redirect(params)
     try:
         return {
             "message": "JardX Backend is running",
