@@ -18,11 +18,12 @@ async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid user")
 
-    amount = payload.get("amount")
+    deposit_amount = payload.get("amount")
+    total_amount = payload.get("total_amount", deposit_amount)
     gateway_name = payload.get("gateway") # "Monnify" or "Flutterwave"
     redirect_url = payload.get("redirect_url")
 
-    if not amount or not gateway_name:
+    if not deposit_amount or not gateway_name:
         raise HTTPException(status_code=400, detail="Amount and gateway are required")
 
     # Fetch user details for the gateway
@@ -36,7 +37,7 @@ async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
     try:
         gateway = PaymentGatewayFactory.get_gateway(gateway_name)
         init_response = await gateway.initialize_payment(
-            amount=float(amount),
+            amount=float(total_amount),
             user_email=user["email"],
             reference=tx_ref,
             user_name=user.get("user_name", "JardX User"),
@@ -47,7 +48,8 @@ async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
         transactions_collection.insert_one({
             "tx_ref": tx_ref,
             "user_id": user_id,
-            "amount": float(amount),
+            "amount": float(deposit_amount),
+            "total_amount": float(total_amount),
             "gateway": gateway_name,
             "status": "PENDING",
             "created_at": datetime.datetime.utcnow().isoformat()

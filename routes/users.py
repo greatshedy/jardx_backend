@@ -94,7 +94,13 @@ async def get_vendor_subscription(data: dict = Depends(get_token)):
         vendor_data = vendors_collection.find_one({"user_id": user_id})
         
         if not vendor_data:
-            return JSONResponse({"message": "Vendor record not found", "status": 404}, status_code=404)
+            return JSONResponse({
+                "status": 200,
+                "data": {
+                    "subscription_status": "none",
+                    "subscription_expiry": None,
+                }
+            }, status_code=200)
         
         subscription_expiry = vendor_data.get("subscription_expiry")
         subscription_status = vendor_data.get("subscription_status", "active")
@@ -398,7 +404,13 @@ async def get_partner_subscription(data: dict = Depends(get_token)):
         partner_data = partners_collection.find_one({"user_id": user_id})
         
         if not partner_data:
-            return JSONResponse({"message": "Partner record not found", "status": 404}, status_code=404)
+            return JSONResponse({
+                "status": 200,
+                "data": {
+                    "subscription_status": "none",
+                    "subscription_expiry": None,
+                }
+            }, status_code=200)
         
         subscription_expiry = partner_data.get("subscription_expiry")
         subscription_status = partner_data.get("subscription_status", "active")
@@ -885,7 +897,7 @@ async def Home(data: dict = Depends(get_token)):
         user_data = user_collection.find_one({"_id": user_id})
         if not user_data:
             return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"message": "User not found"},
             )
 
@@ -1206,6 +1218,22 @@ async def get_selected_house_details(house_id:str,data: dict = Depends(get_token
 
 
 
+
+@router.post("/check-user-exists")
+async def check_user_exists(data: dict):
+    email = data.get("email")
+    if not email:
+        return JSONResponse({"exists": False, "status": 400})
+    user = user_collection.find_one({"email": email})
+    if user:
+        return JSONResponse({
+            "exists": True,
+            "user_name": user.get("user_name", ""),
+            "profile_pic": user.get("profile_pic", ""),
+            "email": user.get("email", ""),
+            "status": 200
+        })
+    return JSONResponse({"exists": False, "status": 200})
 
 # user delete account
 @router.post("/delete-account")
