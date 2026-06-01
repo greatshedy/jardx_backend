@@ -157,7 +157,7 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         
     except Exception as e:
         logger.error(f"Purchase Error: {e}")
-        return JSONResponse(status_code=500, content={"message": "An error occurred during purchase."})
+        return JSONResponse(status_code=500, content={"message": str(e)})
 
 @router.post("/jardhouz/save")
 def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
