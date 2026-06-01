@@ -2,9 +2,7 @@ from argon2 import PasswordHasher
 import random
 from dotenv import load_dotenv
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 import secrets
 from jose import JWTError, jwt,ExpiredSignatureError
 from datetime import datetime, timedelta
@@ -26,6 +24,8 @@ logger = logging.getLogger("jardx")
 # Use absolute path to ensure .env is loaded regardless of current working directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(current_dir, ".env"))
+
+resend.api_key = os.getenv("RESEND_API_KEY")
 
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "fallback_secret_keep_this_secure")
@@ -131,50 +131,9 @@ def VerifyHashed(hashedpassword,password):
 
 
 
-def get_smtp_connection():
-    """
-    Attempts to establish an SMTP connection with fallback:
-    1. Try Port 465 (SSL)
-    2. Try Port 587 (TLS)
-    """
-    sender_email = os.getenv("SENDER_EMAIL")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    smtp_server = os.getenv("SMTP_SERVER")
-
-    # Try Port 465 (SSL) first
-    try:
-        print(f"DEBUG: Attempting SMTP SSL on {smtp_server}:465...")
-        server = smtplib.SMTP_SSL(smtp_server, 465, timeout=30)
-        server.login(sender_email, sender_password)
-        print("DEBUG: SMTP SSL Connected Successfully")
-        return server
-    except Exception as e:
-        print(f"DEBUG: SSL connection failed or timed out: {e}")
-        print("DEBUG: Falling back to TLS on Port 587...")
-
-    # Fallback to Port 587 (TLS)
-    try:
-        server = smtplib.SMTP(smtp_server, 587, timeout=30)
-        server.starttls()
-        server.login(sender_email, sender_password)
-        print("DEBUG: SMTP TLS Connected Successfully")
-        return server
-    except Exception as e:
-        print(f"DEBUG: TLS connection also failed: {e}")
-        raise e
-
 def send_email(receiver_email, otp):
-    # Create the email container
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Your OTP Code for JardX"
-    message["From"] = os.getenv("SENDER_EMAIL")
-    message["To"] = receiver_email
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
 
-    # Plain text fallback
-    plain_text = f"Your OTP code is {otp}. It expires in 5 minutes."
-    message.attach(MIMEText(plain_text, "plain"))
-
-    # HTML email with inline CSS
     html_content = f"""
     <html>
         <head>
@@ -199,12 +158,14 @@ def send_email(receiver_email, otp):
         </body>
     </html>
     """
-    message.attach(MIMEText(html_content, "html"))
 
     try:
-        server = get_smtp_connection()
-        server.send_message(message)
-        server.quit()
+        resend.Emails.send({
+            "from": sender,
+            "to": [receiver_email],
+            "subject": "Your OTP Code for JardX",
+            "html": html_content
+        })
         print("SUCCESS: OTP Email sent successfully!")
         return otp
     except Exception as e:
@@ -345,28 +306,11 @@ def process_base85_image(base64_string: str, size=(500, 500), quality=70) -> str
 
     return base64.b85encode(optimized_bytes).decode("utf-8")
 
-from email.mime.image import MIMEImage
-
 def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount_paid, remaining_balance, image_data):
-    sender_email = os.getenv("SENDER_EMAIL")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    
-    if not sender_email or not sender_password:
-        print("Email configuration missing, cannot send purchase email.")
-        return
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
 
-    # Use 'related' to embed image
-    message = MIMEMultipart("related")
-    message["Subject"] = f"Confirmation: {house_name} ({plan_type.title()})"
-    message["From"] = sender_email
-    message["To"] = receiver_email
+    is_url = image_data and str(image_data).startswith("http")
 
-    body = MIMEMultipart("alternative")
-    message.attach(body)
-
-    is_url = image_data.startswith("http")
-    
-    # HTML email with inline CSS
     html_content = f"""
     <html>
         <head>
@@ -393,15 +337,15 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
                     <p><strong>Remaining Balance:</strong> ₦{remaining_balance:,.2f}</p>
                 </div>
     """
-                
+
     if image_data:
-        img_src = "cid:house_image" if not is_url else image_data
+        img_src = image_data if is_url else image_data
         html_content += f"""
                 <div class="img-container">
                     <img src="{img_src}" alt="Property Image" />
                 </div>
         """
-        
+
     html_content += f"""
                 <p>Thank you for trusting JardX. Visit your portfolio dashboard to manage your assets.</p>
                 <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
@@ -409,42 +353,45 @@ def send_purchase_email(receiver_email, user_name, house_name, plan_type, amount
         </body>
     </html>
     """
-    
-    body.attach(MIMEText(html_content, "html"))
 
+    attachments = []
     if image_data and not is_url:
         try:
             if image_data.startswith("data:image"):
                 base64_data = image_data.split(",", 1)[1]
-                image_bytes = base64.b64decode(base64_data)
             else:
                 try:
-                    image_bytes = base64.b85decode(image_data)
+                    base64_data = base64.b64encode(base64.b85decode(image_data)).decode("utf-8")
                 except Exception:
-                    image_bytes = base64.b64decode(image_data)
-            
-            msg_image = MIMEImage(image_bytes)
-            msg_image.add_header('Content-ID', '<house_image>')
-            msg_image.add_header('Content-Disposition', 'inline')
-            message.attach(msg_image)
-
+                    base64_data = image_data
+            attachments.append({
+                "filename": "property.jpg",
+                "content": base64_data,
+                "content_id": "house_image"
+            })
+            html_content = html_content.replace(
+                '<img src="{image_data}"', '<img src="cid:house_image"'
+            )
         except Exception as e:
             print("Could not attach image to email:", e)
 
+    params = {
+        "from": sender,
+        "to": [receiver_email],
+        "subject": f"Confirmation: {house_name} ({plan_type.title()})",
+        "html": html_content
+    }
+    if attachments:
+        params["attachments"] = attachments
+
     try:
-        server = get_smtp_connection()
-        server.send_message(message)
-        server.quit()
+        resend.Emails.send(params)
         print(f"SUCCESS: Purchase Email sent successfully to {receiver_email}")
     except Exception as e:
         print("ERROR sending purchase email:", e)
 
 def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True):
-    sender_email = os.getenv("SENDER_EMAIL")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    
-    if not sender_email or not sender_password:
-        return
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
 
     child_name = plan_details.get("child_name", "your child")
     plan_type_raw = plan_details.get("plan_type", "child_savings")
@@ -453,13 +400,8 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
     amount = float(plan_details.get("amount_paid", 0))
     months_paid = plan_details.get("months_paid", 1)
     total_months = plan_details.get("total_months", 0)
-    
-    subject = f"Confirmation: JardKidz {plan_type} Setup" if is_setup else f"Receipt: JardKidz {plan_type} Top-up"
 
-    message = MIMEMultipart("alternative")
-    message["Subject"] = subject
-    message["From"] = sender_email
-    message["To"] = receiver_email
+    subject = f"Confirmation: JardKidz {plan_type} Setup" if is_setup else f"Receipt: JardKidz {plan_type} Top-up"
 
     html_content = f"""
     <html>
@@ -488,7 +430,7 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
                 <div class="content">
                     <p>Hello <strong>{user_name}</strong>,</p>
                     <p>{"Your child's future investment has been successfully initialized" if is_setup else "We've received your installment payment for your child's investment"}. Here are the transaction details:</p>
-                    
+
                     <div class="details-box">
                         <div class="details-row">
                             <span class="details-label">Child's Name:</span>
@@ -507,10 +449,9 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
                             <span class="details-value">JardKidz {plan_type}</span>
                         </div>
                     </div>
-                    
+
                     <p>Thank you for choosing <strong>JardX</strong> to secure your child's future. You can track this progress in real-time on your dashboard.</p>
                 </div>
-                <!-- Deep Link via Web Bridge: Gmail blocks custom schemes; the bridge page silently redirects to jardx:// -->
                 <a href="{os.getenv('MOBILE_URL', '#')}?autoOpen=true&type=kidz&sub_type={sub_type}&name={child_name}" class="cta">Open in JardX App</a>
                 <p style="text-align: center; margin-top: 10px;">
                     <a href="{os.getenv('MOBILE_URL', '#')}?type=kidz&sub_type={sub_type}&name={child_name}" style="color: #ff6900; font-size: 14px; text-decoration: none;">View in Browser</a>
@@ -523,27 +464,20 @@ def send_jard_kidz_email(receiver_email, user_name, plan_details, is_setup=True)
         </body>
     </html>
     """
-    message.attach(MIMEText(html_content, "html"))
 
     try:
-        server = get_smtp_connection()
-        server.send_message(message)
-        server.quit()
+        resend.Emails.send({
+            "from": sender,
+            "to": [receiver_email],
+            "subject": subject,
+            "html": html_content
+        })
         print(f"SUCCESS: JardKidz Email sent to {receiver_email}")
     except Exception as e:
         print("ERROR sending JardKidz email:", e)
 
 def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
-    sender_email = os.getenv("SENDER_EMAIL")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    
-    if not sender_email or not sender_password:
-        return
-
-    message = MIMEMultipart("alternative")
-    message["Subject"] = "Wallet Credit Confirmation - JardX"
-    message["From"] = sender_email
-    message["To"] = receiver_email
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
 
     html_content = f"""
     <html>
@@ -571,13 +505,12 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
                 <div class="content">
                     <p>Hello <strong>{user_name}</strong>,</p>
                     <p>Your JardX wallet has been successfully credited. Your funds are now available for investment in property or JardKidz plans.</p>
-                    
+
                     <div class="balance-info">
                         <div class="balance-label">Current Wallet Balance</div>
                         <div class="balance-value">₦{new_balance:,.2f}</div>
                     </div>
                 </div>
-                <!-- Deep Link via Web Bridge: Gmail blocks custom schemes; the bridge page silently redirects to jardx:// -->
                 <a href="{os.getenv('MOBILE_URL', '#')}?autoOpen=true&type=payment&amount={amount:.2f}" style="display: block; width: 220px; margin: 30px auto; background-color: #4CAF50; color: #ffffff; text-decoration: none; padding: 14px; border-radius: 10px; text-align: center; font-weight: bold;">Open JardX App</a>
                 <p style="text-align: center; margin-top: 10px;">
                     <a href="{os.getenv('MOBILE_URL', '#')}?type=payment&amount={amount:.2f}" style="color: #4CAF50; font-size: 14px; text-decoration: none;">View in Browser</a>
@@ -590,12 +523,14 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
         </body>
     </html>
     """
-    message.attach(MIMEText(html_content, "html"))
 
     try:
-        server = get_smtp_connection()
-        server.send_message(message)
-        server.quit()
+        resend.Emails.send({
+            "from": sender,
+            "to": [receiver_email],
+            "subject": "Wallet Credit Confirmation - JardX",
+            "html": html_content
+        })
         print(f"SUCCESS: Wallet Credit Email sent to {receiver_email}")
     except Exception as e:
         print("ERROR sending wallet credit email:", e)
@@ -766,17 +701,7 @@ def process_partner_commission(user_id, amount, user_collection, transactions_co
 
 
 def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amount, items, address):
-    sender_email = os.getenv("SENDER_EMAIL")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    
-    if not sender_email or not sender_password:
-        print("Email configuration missing, cannot send purchase email.")
-        return
-
-    message = MIMEMultipart("alternative")
-    message["Subject"] = f"Invoice: Order #{order_id} Successful"
-    message["From"] = sender_email
-    message["To"] = receiver_email
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
 
     items_html = ""
     for item in items:
@@ -805,12 +730,12 @@ def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amoun
                 <h1>JardProc Invoice</h1>
                 <p>Hello <strong>{user_name}</strong>,</p>
                 <p>Thank you for shopping on JardProc Store! We have successfully processed your order and payment.</p>
-                
+
                 <div class="details">
                     <p><strong>Order ID:</strong> #{order_id}</p>
                     <p><strong>Delivery Address:</strong> {address}</p>
                 </div>
-                
+
                 <table>
                     <thead>
                         <tr>
@@ -826,19 +751,21 @@ def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amoun
                         </tr>
                     </tbody>
                 </table>
-                
+
                 <p style="margin-top: 20px; text-align: center;">You can track this order in real-time inside your mobile application.</p>
                 <div class="footer">© {datetime.now().year} JardProc Store. All rights reserved.</div>
             </div>
         </body>
     </html>
     """
-    message.attach(MIMEText(html_content, "html"))
 
     try:
-        server = get_smtp_connection()
-        server.send_message(message)
-        server.quit()
+        resend.Emails.send({
+            "from": sender,
+            "to": [receiver_email],
+            "subject": f"Invoice: Order #{order_id} Successful",
+            "html": html_content
+        })
         print(f"SUCCESS: Invoice Email sent successfully to {receiver_email}")
     except Exception as e:
         print("ERROR sending invoice email:", e)
