@@ -144,7 +144,7 @@ def get_smtp_connection():
     # Try Port 465 (SSL) first
     try:
         print(f"DEBUG: Attempting SMTP SSL on {smtp_server}:465...")
-        server = smtplib.SMTP_SSL(smtp_server, 465, timeout=15)
+        server = smtplib.SMTP_SSL(smtp_server, 465, timeout=30)
         server.login(sender_email, sender_password)
         print("DEBUG: SMTP SSL Connected Successfully")
         return server
@@ -154,7 +154,7 @@ def get_smtp_connection():
 
     # Fallback to Port 587 (TLS)
     try:
-        server = smtplib.SMTP(smtp_server, 587, timeout=15)
+        server = smtplib.SMTP(smtp_server, 587, timeout=30)
         server.starttls()
         server.login(sender_email, sender_password)
         print("DEBUG: SMTP TLS Connected Successfully")
