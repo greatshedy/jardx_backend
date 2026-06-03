@@ -32,7 +32,11 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
 
         # Determine the correct plan index
         plan_idx = purchase.plan_index if purchase.plan_index is not None else 0
-        house_plan = house["house_pricing_plan"][plan_idx]
+        pricing_plans = house.get("house_pricing_plan", [])
+        if plan_idx >= len(pricing_plans):
+            logger.error(f"Plan index {plan_idx} out of range for house {purchase.house_id} (has {len(pricing_plans)} plans)")
+            return JSONResponse(status_code=400, content={"message": "Selected plan is not available."})
+        house_plan = pricing_plans[plan_idx]
 
         # Process Outright vs Installment
         if purchase.plan_type == "outright":
@@ -60,11 +64,15 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         
         else:
             # Installment Handling
-            # house_plan is already defined above via plan_idx
             if purchase.plan_index is None:
                 return JSONResponse(status_code=400, content={"message": "Installment plan index missing."})
-                
-            num_months = int(house_plan["numInstallments"][purchase.plan_index])
+
+            installments = house_plan.get("numInstallments", [])
+            if purchase.plan_index >= len(installments):
+                logger.error(f"Installment index {purchase.plan_index} out of range for plan {plan_idx} (has {len(installments)} options)")
+                return JSONResponse(status_code=400, content={"message": "Selected installment option is not available."})
+
+            num_months = int(installments[purchase.plan_index])
             percentage_increase = float(house_plan["percentageIncrease"])
             outright_price = float(house_plan["outrightPrice"])
             down_payment_perc = float(house_plan["downPayment"])
@@ -157,7 +165,7 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         
     except Exception as e:
         logger.error(f"Purchase Error: {e}")
-        return JSONResponse(status_code=500, content={"message": str(e)})
+        return JSONResponse(status_code=500, content={"message": "An error occurred during purchase. Please try again."})
 
 @router.post("/jardhouz/save")
 def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
