@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Runner - JardX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; padding: 40px 20px; display: flex; justify-content: center; }
+        .container { max-width: 860px; width: 100%; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
+        .header h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+        .header p { color: #64748b; font-size: 14px; margin-top: 4px; }
+        .header-actions { display: flex; gap: 10px; }
+        .card { background: #1e293b; border-radius: 16px; padding: 20px; margin-bottom: 12px; border: 1px solid #334155; }
+        .card-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+        .card-info { flex: 1; }
+        .card-info h3 { font-size: 16px; font-weight: 700; }
+        .card-info p { color: #64748b; font-size: 13px; margin-top: 4px; }
+        .tag { display: inline-block; padding: 2px 10px; border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; margin-left: 8px; vertical-align: middle; }
+        .tag-pass { background: #064e3b; color: #6ee7b7; }
+        .tag-fail { background: #450a0a; color: #fca5a5; }
+        .tag-idle { background: #334155; color: #94a3b8; }
+        .duration { color: #64748b; font-size: 12px; margin-left: 6px; }
+        .btn { padding: 8px 20px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; white-space: nowrap; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+        .btn:hover { opacity: 0.85; }
+        .btn-run { background: #334155; color: #e2e8f0; }
+        .btn-primary { background: #6366f1; color: white; padding: 10px 24px; font-size: 14px; }
+        .btn-danger { background: #7f1d1d; color: #fca5a5; padding: 10px 24px; font-size: 14px; }
+        .btn-clear { background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 10px 24px; font-size: 14px; }
+        .result-box { margin-top: 14px; padding: 14px; background: #0f172a; border-radius: 10px; border: 1px solid #334155; }
+        .result-box .msg { font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+        .result-box .msg.pass { color: #6ee7b7; }
+        .result-box .msg.fail { color: #fca5a5; }
+        .result-box pre { background: #020617; color: #a5b4fc; padding: 12px; border-radius: 8px; font-size: 12px; overflow-x: auto; line-height: 1.6; max-height: 300px; overflow-y: auto; }
+        .summary-bar { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; display: flex; gap: 24px; flex-wrap: wrap; font-size: 14px; }
+        .summary-bar span { display: flex; align-items: center; gap: 6px; }
+        .summary-bar .count { font-weight: 700; font-size: 18px; }
+        .summary-bar .label { color: #64748b; font-size: 13px; }
+        .summary-bar .total { color: #94a3b8; }
+        .summary-bar .passed-count { color: #6ee7b7; }
+        .summary-bar .failed-count { color: #fca5a5; }
+        a { text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>Test Runner</h1>
+                <p>Live tests against the live backend</p>
+            </div>
+            <div class="header-actions">
+                <a href="/admin/test-runner/clear"><button class="btn btn-clear">Clear Results</button></a>
+                <a href="/admin/test-runner/run/all"><button class="btn btn-primary">Run All Tests</button></a>
+            </div>
+        </div>
+
+        {% set total = tests | length %}
+        {% set passed = results.values() | selectattr("passed", "equalto", true) | list | length %}
+        {% set failed = results.values() | selectattr("passed", "equalto", false) | list | length %}
+
+        {% if results %}
+        <div class="summary-bar">
+            <span><span class="count total">{{ total }}</span><span class="label">total</span></span>
+            <span><span class="count passed-count">{{ passed }}</span><span class="label">passed</span></span>
+            <span><span class="count failed-count">{{ failed }}</span><span class="label">failed</span></span>
+            {% if results %}
+            <span style="color:#64748b;font-size:12px;margin-left:auto;">last run: just now</span>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% for test in tests %}
+        {% set r = results.get(test.id) %}
+        <div class="card" id="{{ test.id }}">
+            <div class="card-row">
+                <div class="card-info">
+                    <h3>
+                        {{ test.name }}
+                        {% if r %}
+                        <span class="tag {{ 'tag-pass' if r.passed else 'tag-fail' }}">{{ 'PASS' if r.passed else 'FAIL' }}</span>
+                        <span class="duration">{{ r.duration_ms }}ms</span>
+                        {% else %}
+                        <span class="tag tag-idle">IDLE</span>
+                        {% endif %}
+                    </h3>
+                    <p>{{ test.description }}</p>
+                </div>
+                <a href="/admin/test-runner/run/{{ test.id }}"><button class="btn btn-run">Run Test</button></a>
+            </div>
+            {% if r and r.details %}
+            <div class="result-box">
+                <div class="msg {{ 'pass' if r.passed else 'fail' }}">{{ r.message }}</div>
+                <pre>{{ r.details | tojson(indent=2) }}</pre>
+            </div>
+            {% elif r and not r.details %}
+            <div class="result-box">
+                <div class="msg {{ 'pass' if r.passed else 'fail' }}">{{ r.message }}</div>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+
+        <div style="text-align:center;margin-top:32px;color:#475569;font-size:12px;">
+            Test Runner &middot; JardX Backend &middot; <a href="/admin/test-runner/clear" style="color:#6366f1;">Clear Results</a>
+        </div>
+    </div>
+</body>
+</html>

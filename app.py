@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from routes import users, admin, payment, finance, portfolio, jardproc
+from routes.test_runner.routes import router as test_runner_router
 
 # Use absolute path to ensure .env is loaded
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -123,6 +124,7 @@ app.include_router(payment.router)
 app.include_router(finance.router)
 app.include_router(portfolio.router)
 app.include_router(jardproc.router)
+app.include_router(test_runner_router)
 
 # --- Keep-Alive & Health Check Logic ---
 @app.get("/health")
