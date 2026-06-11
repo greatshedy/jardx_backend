@@ -52,6 +52,10 @@ class House(BaseModel):
     house_landmarks:list=[]
     house_benefits:list=[]
     house_status:str=""
+    house_type:str=""
+    house_is_promo:bool=False
+    house_promo_type:str=""
+    house_promo_value:float=0.0
 
 class PropertyPurchase(BaseModel):
     house_id: str

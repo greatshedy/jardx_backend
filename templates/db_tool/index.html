@@ -1,0 +1,20 @@
+{% extends "db_tool/base.html" %}
+{% block title %}Collections{% endblock %}
+{% block content %}
+<div class="flex flex-center gap-4 mb-4">
+  <h1 style="font-size:22px; font-weight:800;">Database Collections</h1>
+  <span class="text-muted">{{ collections|length }} collections</span>
+</div>
+<div class="card-grid">
+  {% for name, _ in collections|dictsort %}
+    <a href="/admin/db-tool/{{ name }}" class="collection-card">
+      <div class="name">{{ name }}</div>
+      <div class="count">
+        {% set c = counts.get(name, "?") %}
+        {% if c is number %}{{ c }}{% else %}?{% endif %}
+      </div>
+      <div class="sub">documents</div>
+    </a>
+  {% endfor %}
+</div>
+{% endblock %}

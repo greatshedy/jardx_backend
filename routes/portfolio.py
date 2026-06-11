@@ -12,6 +12,15 @@ logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/users/portfolio", tags=["Portfolio"])
 
+def apply_promo_price(house, price):
+    if house.get("house_is_promo") and house.get("house_promo_type"):
+        if house["house_promo_type"] == "percentage":
+            discount = float(house.get("house_promo_value", 0))
+            return round(price * (1 - discount / 100), 2)
+        elif house["house_promo_type"] == "fixed":
+            return float(house.get("house_promo_value", 0))
+    return price
+
 @router.post("/buy")
 def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, data: dict = Depends(get_token)):
     try:
@@ -41,7 +50,7 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         # Process Outright vs Installment
         if purchase.plan_type == "outright":
             # outright purchase uses the price
-            outright_price = float(house_plan["outrightPrice"])
+            outright_price = apply_promo_price(house, float(house_plan["outrightPrice"]))
             
             # create portfolio logic
             portfolio_item = {
@@ -74,7 +83,7 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
 
             num_months = int(installments[purchase.plan_index])
             percentage_increase = float(house_plan["percentageIncrease"])
-            outright_price = float(house_plan["outrightPrice"])
+            outright_price = apply_promo_price(house, float(house_plan["outrightPrice"]))
             down_payment_perc = float(house_plan["downPayment"])
 
             total_percentage_increase = (percentage_increase / 100) * (purchase.plan_index + 1)

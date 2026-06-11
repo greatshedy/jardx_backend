@@ -1,0 +1,68 @@
+{% extends "db_tool/base.html" %}
+{% block title %}{{ collection }} / {{ doc_id[:12] }}...{% endblock %}
+{% block nav_extra %}
+  <a href="/admin/db-tool/{{ collection }}">{{ collection }}</a>
+  <span style="color:#64748B; font-size:13px;">/ {{ doc_id[:16] }}...</span>
+{% endblock %}
+{% block content %}
+<div class="flex flex-center gap-4 mb-4">
+  <h1 style="font-size:22px; font-weight:800;">
+    <a href="/admin/db-tool" style="color:#64748B; font-weight:600;">Collections</a>
+    <span style="color:#64748B;"> / </span>
+    <a href="/admin/db-tool/{{ collection }}" style="color:#64748B;">{{ collection }}</a>
+    <span style="color:#64748B;"> / </span>
+    {{ doc_id[:20] }}...
+  </h1>
+</div>
+
+<div class="flex gap-2 mb-4">
+  <button class="btn btn-danger btn-sm" onclick="confirmDelete()">Delete Document</button>
+  <a href="/admin/db-tool/{{ collection }}" class="btn btn-secondary btn-sm">Back to {{ collection }}</a>
+</div>
+
+<form method="post" action="/admin/db-tool/{{ collection }}/{{ doc_id }}">
+<div class="card" style="overflow-x:auto;">
+<table style="width:100%;">
+  <tbody>
+    {% for key, value in doc.items() %}
+    <tr>
+      <td class="doc-key">{{ key }}</td>
+      <td class="doc-value" style="width:100%;">
+        {% if key == "_id" %}
+          <span style="font-family:monospace;">{{ value }}</span>
+          <input type="hidden" name="{{ key }}" value="{{ value }}">
+        {% else %}
+          <textarea name="{{ key }}" rows="{{ value|string|length // 60 + 2 if value is string else 3 }}">{% if value is mapping or value is sequence %}{{ value | tojson(indent=2) if value is mapping else value | tojson }}{% else %}{{ value }}{% endif %}</textarea>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<div class="mt-4">
+  <button type="submit" class="btn btn-primary">Save Changes</button>
+</div>
+</form>
+
+<form id="deleteForm" method="post" action="/admin/db-tool/{{ collection }}/{{ doc_id }}/delete" style="display:none;"></form>
+
+<script>
+function confirmDelete() {
+  if (confirm('Permanently delete this document?\n\nCollection: {{ collection }}\nID: {{ doc_id }}')) {
+    document.getElementById('deleteForm').submit();
+  }
+}
+
+// Auto-grow textareas
+document.querySelectorAll('textarea').forEach(el => {
+  el.style.minHeight = '36px';
+  function resize() {
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }
+  el.addEventListener('input', resize);
+  setTimeout(resize, 0);
+});
+</script>
+{% endblock %}

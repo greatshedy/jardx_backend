@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}DB Tool{% endblock %} — Jardx</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: #0F172A;
+      color: #E2E8F0;
+      min-height: 100vh;
+    }
+    a { color: #FF6900; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Nav */
+    .nav {
+      background: #1E293B;
+      border-bottom: 1px solid #334155;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      height: 56px;
+      gap: 20px;
+    }
+    .nav-brand {
+      font-weight: 800;
+      font-size: 15px;
+      color: #FF6900;
+      letter-spacing: 0.5px;
+    }
+    .nav a {
+      color: #94A3B8;
+      font-size: 13px;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    .nav a:hover { color: #FF6900; text-decoration: none; }
+
+    /* Flash messages */
+    .flash {
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .flash-success { background: #065F46; color: #A7F3D0; }
+    .flash-error   { background: #7F1D1D; color: #FECACA; }
+
+    /* Layout */
+    .container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+
+    /* Cards */
+    .card {
+      background: #1E293B;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .collection-card {
+      background: #1E293B;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      transition: border-color 0.2s, transform 0.15s;
+      display: block;
+    }
+    .collection-card:hover {
+      border-color: #FF6900;
+      transform: translateY(-2px);
+      text-decoration: none;
+    }
+    .collection-card .name {
+      font-size: 15px;
+      font-weight: 700;
+      color: #F1F5F9;
+    }
+    .collection-card .count {
+      font-size: 28px;
+      font-weight: 800;
+      color: #FF6900;
+      margin-top: 8px;
+    }
+    .collection-card .sub {
+      font-size: 12px;
+      color: #64748B;
+      margin-top: 4px;
+    }
+
+    /* Table */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid #334155;
+      border-radius: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      background: #1E293B;
+      color: #94A3B8;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid #334155;
+      white-space: nowrap;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #1E293B;
+      color: #CBD5E1;
+      max-width: 250px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    tr:hover td { background: #1E293B; }
+    tr:last-child td { border-bottom: none; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary   { background: #FF6900; color: #fff; }
+    .btn-danger    { background: #DC2626; color: #fff; }
+    .btn-secondary { background: #334155; color: #E2E8F0; }
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 12px;
+      border-radius: 6px;
+    }
+
+    /* Form */
+    input, textarea, select {
+      background: #0F172A;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: #E2E8F0;
+      font-size: 13px;
+      font-family: 'Inter', sans-serif;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: #FF6900;
+    }
+    textarea { resize: vertical; min-height: 36px; font-family: monospace; }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #94A3B8;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .form-group { margin-bottom: 16px; }
+
+    /* Search */
+    .search-bar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .search-bar input { flex: 1; }
+
+    /* Pagination */
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 20px;
+    }
+    .pagination a, .pagination span {
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .pagination a {
+      background: #1E293B;
+      color: #E2E8F0;
+      border: 1px solid #334155;
+    }
+    .pagination a:hover { border-color: #FF6900; text-decoration: none; }
+    .pagination .active {
+      background: #FF6900;
+      color: #fff;
+      border: 1px solid #FF6900;
+    }
+
+    /* Doc view */
+    .doc-key {
+      font-weight: 600;
+      color: #94A3B8;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      min-width: 180px;
+      padding: 10px 12px 10px 0;
+      vertical-align: top;
+    }
+    .doc-value {
+      padding: 10px 0;
+      word-break: break-all;
+      font-family: monospace;
+      font-size: 13px;
+      color: #E2E8F0;
+    }
+    .doc-value pre {
+      background: #0F172A;
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .mt-4 { margin-top: 16px; }
+    .mb-4 { margin-bottom: 16px; }
+    .flex { display: flex; }
+    .flex-center { align-items: center; }
+    .gap-2 { gap: 8px; }
+    .gap-4 { gap: 16px; }
+    .text-muted { color: #64748B; font-size: 13px; }
+    .text-sm { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <span class="nav-brand">DB TOOL</span>
+    <a href="/admin/db-tool">Collections</a>
+    {% block nav_extra %}{% endblock %}
+  </nav>
+
+  {% set success = request.query_params.get("success") %}
+  {% set error = request.query_params.get("error") %}
+  {% if success %}
+    <div class="flash flash-success">&#10003; {{ success }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="flash flash-error">&#10007; {{ error }}</div>
+  {% endif %}
+
+  <div class="container">
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

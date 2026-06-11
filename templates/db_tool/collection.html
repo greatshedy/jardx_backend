@@ -1,0 +1,94 @@
+{% extends "db_tool/base.html" %}
+{% block title %}{{ collection }}{% endblock %}
+{% block nav_extra %}
+  <a href="/admin/db-tool/{{ collection }}" style="color:#FF6900;">{{ collection }}</a>
+{% endblock %}
+{% block content %}
+<div class="flex flex-center gap-4 mb-4">
+  <h1 style="font-size:22px; font-weight:800;">
+    <a href="/admin/db-tool" style="color:#64748B; font-weight:600;">Collections</a>
+    <span style="color:#64748B;"> / </span>
+    {{ collection }}
+  </h1>
+  <span class="text-muted">{{ total }} documents</span>
+</div>
+
+<form class="search-bar" method="get" action="/admin/db-tool/{{ collection }}">
+  <input type="text" name="search" placeholder="Search..." value="{{ search }}">
+  <button type="submit" class="btn btn-primary">Search</button>
+  {% if search %}
+    <a href="/admin/db-tool/{{ collection }}" class="btn btn-secondary">Clear</a>
+  {% endif %}
+</form>
+
+<form method="post" action="/admin/db-tool/{{ collection }}/delete-all"
+      onsubmit="return confirm('DELETE ALL {{ total }} documents in &#39;{{ collection }}&#39;?\n\nThis cannot be undone.')"
+      style="margin-bottom:20px;">
+  <button type="submit" class="btn btn-danger">Delete All ({{ total }})</button>
+</form>
+
+{% if docs %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>_id</th>
+      {% for f in fields %}
+        {% if f != "_id" %}
+          <th>{{ f }}</th>
+        {% endif %}
+      {% endfor %}
+      <th style="text-align:center;">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for doc in docs %}
+    <tr>
+      <td style="font-family:monospace; font-size:12px; max-width:120px;" title="{{ doc._id }}">
+        {{ doc._id[:20] }}...
+      </td>
+      {% for f in fields %}
+        {% if f != "_id" %}
+          <td title="{{ format_value(doc.get(f, '')) }}">
+            {{ format_value(doc.get(f, '')) }}
+          </td>
+        {% endif %}
+      {% endfor %}
+      <td style="text-align:center; white-space:nowrap;">
+        <a href="/admin/db-tool/{{ collection }}/{{ doc._id }}" class="btn btn-primary btn-sm">View</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% if total_pages > 1 %}
+<div class="pagination">
+  {% if page > 1 %}
+    <a href="/admin/db-tool/{{ collection }}?page={{ page - 1 }}&per_page={{ per_page }}{% if search %}&search={{ search }}{% endif %}">Prev</a>
+  {% endif %}
+  {% for p in range(1, total_pages + 1) %}
+    {% if p == page %}
+      <span class="active">{{ p }}</span>
+    {% elif p <= 3 or p > total_pages - 3 or (p >= page - 2 and p <= page + 2) %}
+      <a href="/admin/db-tool/{{ collection }}?page={{ p }}&per_page={{ per_page }}{% if search %}&search={{ search }}{% endif %}">{{ p }}</a>
+    {% elif p == 4 or p == total_pages - 3 %}
+      <span style="color:#64748B;">...</span>
+    {% endif %}
+  {% endfor %}
+  {% if page < total_pages %}
+    <a href="/admin/db-tool/{{ collection }}?page={{ page + 1 }}&per_page={{ per_page }}{% if search %}&search={{ search }}{% endif %}">Next</a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="card" style="text-align:center; padding:40px;">
+  <p class="text-muted">No documents found in <strong>{{ collection }}</strong>.</p>
+  {% if search %}
+    <p class="text-muted mt-4">No results for "{{ search }}".</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

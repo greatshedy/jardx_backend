@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException
 from typing import List
 from model import House, JardKidzPlan
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from starlette import status
 from utill import get_token, chunk_base64_string, reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary
 
@@ -87,6 +87,10 @@ async def add_house(
     house_pricing_plan: str = Form(...), # JSON string
     house_landmarks: str = Form("[]"), # JSON string
     house_benefits: str = Form("[]"), # JSON string
+    house_type: str = Form(""),
+    house_is_promo: bool = Form(False),
+    house_promo_type: str = Form(""),
+    house_promo_value: float = Form(0.0),
     images: list[UploadFile] = File(...)
 ):
     try:
@@ -105,6 +109,10 @@ async def add_house(
             "house_pricing_plan": json.loads(house_pricing_plan),
             "house_landmarks": json.loads(house_landmarks),
             "house_benefits": json.loads(house_benefits),
+            "house_type": house_type,
+            "house_is_promo": house_is_promo,
+            "house_promo_type": house_promo_type,
+            "house_promo_value": house_promo_value,
             "house_image": new_image_urls
         }
         
@@ -154,6 +162,58 @@ async def add_house(
         logger.error(f"Error adding house: {e}")
         return JSONResponse({"message": f"Error adding house: {str(e)}", "status": 500})
 
+
+@router.get("/bulk-estate-template")
+async def bulk_estate_template():
+    template_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "estate_template.csv")
+    return FileResponse(template_path, media_type="text/csv", filename="estate_template.csv")
+
+
+@router.post("/bulk-add-houses")
+async def bulk_add_houses(payload: dict):
+    try:
+        houses = payload.get("houses", [])
+        if not houses:
+            return JSONResponse({"message": "No houses provided", "status": 400})
+        created = 0
+        errors = []
+        for i, house_data in enumerate(houses):
+            try:
+                pricing = house_data.get("house_pricing_plan", [])
+                if isinstance(pricing, str):
+                    pricing = json.loads(pricing)
+                landmarks = house_data.get("house_landmarks", [])
+                if isinstance(landmarks, str):
+                    landmarks = [l.strip() for l in landmarks.split("|") if l.strip()]
+                benefits = house_data.get("house_benefits", [])
+                if isinstance(benefits, str):
+                    benefits = [b.strip() for b in benefits.split("|") if b.strip()]
+                doc = {
+                    "house_name": house_data.get("house_name", ""),
+                    "house_about": house_data.get("house_about", ""),
+                    "house_location": house_data.get("house_location", ""),
+                    "house_status": house_data.get("house_status", "Active"),
+                    "house_type": house_data.get("house_type", ""),
+                    "house_landmarks": landmarks,
+                    "house_benefits": benefits,
+                    "house_pricing_plan": pricing,
+                    "house_image": [],
+                    "house_is_promo": house_data.get("house_is_promo", False),
+                    "house_promo_type": house_data.get("house_promo_type", ""),
+                    "house_promo_value": float(house_data.get("house_promo_value", 0)),
+                }
+                house_collection.insert_one(doc)
+                created += 1
+            except Exception as row_err:
+                errors.append({"row": i + 1, "name": house_data.get("house_name", f"Row {i + 1}"), "error": str(row_err)})
+        return JSONResponse({
+            "message": f"{created} houses created",
+            "data": {"created": created, "errors": errors},
+            "status": 200
+        })
+    except Exception as e:
+        logger.error(f"Error in bulk-add-houses: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
 
 
 @router.get("/get-house",response_model=list[House])
@@ -209,6 +269,10 @@ async def update_house(
     house_pricing_plan: str = Form(None),
     house_landmarks: str = Form(None),
     house_benefits: str = Form(None),
+    house_type: str = Form(None),
+    house_is_promo: bool = Form(None),
+    house_promo_type: str = Form(None),
+    house_promo_value: float = Form(None),
     existing_images: str = Form("[]"), # JSON string of existing URLs to keep
     images: list[UploadFile] = File(None)
 ):
@@ -221,6 +285,10 @@ async def update_house(
         if house_pricing_plan: update_data["house_pricing_plan"] = json.loads(house_pricing_plan)
         if house_landmarks: update_data["house_landmarks"] = json.loads(house_landmarks)
         if house_benefits: update_data["house_benefits"] = json.loads(house_benefits)
+        if house_type is not None: update_data["house_type"] = house_type
+        if house_is_promo is not None: update_data["house_is_promo"] = house_is_promo
+        if house_promo_type is not None: update_data["house_promo_type"] = house_promo_type
+        if house_promo_value is not None: update_data["house_promo_value"] = house_promo_value
 
         # Handle images
         final_images = json.loads(existing_images)
