@@ -43,8 +43,6 @@ real_vendor = {
     "user_id": "352af721-4c8a-42cd-aaf7-214c8a82cd73",
     "status": "unverified",
     "created_at": "2026-05-07T18:18:35.280069",
-    "rating": 4.5,
-    "reviews_count": 132,
 }
 
 existing = vendors_collection.find_one({"email": real_vendor["email"]})

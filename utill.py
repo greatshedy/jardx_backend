@@ -536,11 +536,21 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
         print("ERROR sending wallet credit email:", e)
 
 
+def _is_partner(user):
+    """Check if a user is a JardPartner (not a vendor)."""
+    if not user:
+        return False
+    return user.get("partner_type") == "partner" or user.get("is_partner") is True
+
+
 def process_referral_logic(user_id, amount, user_collection, transactions_collection, give_referrer_bonus=True):
     """
     Handles referral activation for the current user and bonus distribution for the referrer.
     
-    Tiers:
+    Partners do NOT participate in the standard referral system.
+    They earn only through process_partner_commission on property transactions.
+    
+    Tiers (standard users only):
       - #5k – #49k: 2% referral link (no self-bonus)
       - #50k+:      5% referral link + 10% instant self-bonus on first deposit
     """
@@ -548,6 +558,10 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
     uid_str = str(user_id)
     user = user_collection.find_one({"_id": uid_str})
     if not user:
+        return
+    
+    # Partners get nothing from the standard referral system
+    if _is_partner(user):
         return
     
     # 1. Handle Activation (One-time based on first qualifying payment)
@@ -594,35 +608,43 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
         # Resolve referrer
         referrer = user_collection.find_one({"_id": referrer_id})
         if referrer and referrer.get("is_referral_active"):
-            ref_percentage = referrer.get("referral_percentage", 0.0)
-            if ref_percentage > 0:
-                bonus_amount = (ref_percentage / 100) * amount
-                
-                # Credit referrer's wallet
-                new_ref_balance = float(referrer.get("wallet_balance", 0.0)) + bonus_amount
+            # Partners don't earn through the standard referral system
+            if _is_partner(referrer):
+                # Mark bonus as paid to avoid repeated DB lookups on future deposits
                 user_collection.update_one(
-                    {"_id": referrer_id}, 
-                    {"$set": {"wallet_balance": new_ref_balance}}
-                )
-                
-                # Record transaction history for the bonus
-                transactions_collection.insert_one({
-                    "tx_ref": f"REF-BONUS-{secrets.token_hex(4).upper()}",
-                    "user_id": str(referrer_id),
-                    "amount": bonus_amount,
-                    "gateway": "Referral System",
-                    "type": "CREDIT",
-                    "purpose": f"Referral Bonus: {user.get('user_name', 'New User')} deposit",
-                    "status": "SUCCESS",
-                    "created_at": datetime.utcnow().isoformat()
-                })
-                print(f"DEBUG: Referral bonus of {bonus_amount} ({ref_percentage}%) credited to {referrer_id}")
-                
-                # 3. Mark the bonus as paid so it doesn't trigger on subsequent deposits
-                user_collection.update_one(
-                    {"_id": uid_str}, 
+                    {"_id": uid_str},
                     {"$set": {"referral_bonus_paid": True}}
                 )
+            else:
+                ref_percentage = referrer.get("referral_percentage", 0.0)
+                if ref_percentage > 0:
+                    bonus_amount = (ref_percentage / 100) * amount
+                    
+                    # Credit referrer's wallet
+                    new_ref_balance = float(referrer.get("wallet_balance", 0.0)) + bonus_amount
+                    user_collection.update_one(
+                        {"_id": referrer_id}, 
+                        {"$set": {"wallet_balance": new_ref_balance}}
+                    )
+                    
+                    # Record transaction history for the bonus
+                    transactions_collection.insert_one({
+                        "tx_ref": f"REF-BONUS-{secrets.token_hex(4).upper()}",
+                        "user_id": str(referrer_id),
+                        "amount": bonus_amount,
+                        "gateway": "Referral System",
+                        "type": "CREDIT",
+                        "purpose": f"Referral Bonus: {user.get('user_name', 'New User')} deposit",
+                        "status": "SUCCESS",
+                        "created_at": datetime.utcnow().isoformat()
+                    })
+                    print(f"DEBUG: Referral bonus of {bonus_amount} ({ref_percentage}%) credited to {referrer_id}")
+                    
+                    # 3. Mark the bonus as paid so it doesn't trigger on subsequent deposits
+                    user_collection.update_one(
+                        {"_id": uid_str}, 
+                        {"$set": {"referral_bonus_paid": True}}
+                    )
 
 
 def process_partner_commission(user_id, amount, user_collection, transactions_collection):
@@ -769,6 +791,232 @@ def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amoun
         print(f"SUCCESS: Invoice Email sent successfully to {receiver_email}")
     except Exception as e:
         print("ERROR sending invoice email:", e)
+
+
+# ─────────────────────────────────────────────
+# SUBSCRIPTION & REMINDER EMAIL FUNCTIONS
+# ─────────────────────────────────────────────
+
+def send_subscription_reminder_email(receiver_email, user_name, plan_type, fee, days=30):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    urgency = "⚠️ " if days <= 7 else ""
+    subject = f"{urgency}Reminder: Your {plan_type} Subscription Expires in {days} Days"
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#ff6900}} .fee{{font-size:24px;font-weight:bold;color:#ff6900;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>{'⚠️ Action Required!' if days <= 7 else 'Subscription Reminder'}</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your <strong>{plan_type}</strong> subscription will expire in <strong>{days} days</strong>.</p>
+    <p>Renewal Fee: <span class="fee">₦{fee:,.2f}</span></p>
+    {"<p><strong>Note:</strong> If not renewed by the expiry date, your subscription will expire and you may lose access to your {plan_type} dashboard.</p>" if days > 3 else '<p><strong>Urgent:</strong> Renew now to avoid service interruption.</p>'}
+    <p>Log into your JardX app to renew or enable auto-renewal.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+        print(f"SUCCESS: Subscription reminder email sent to {receiver_email}")
+    except Exception as e:
+        print(f"ERROR sending subscription reminder: {e}")
+
+
+def send_subscription_penalty_email(receiver_email, user_name, plan_type, fee, total_due):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    subject = f"⚠️ {plan_type} Subscription Expired - Penalty Applied"
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#e74c3c}} .fee{{font-size:20px;font-weight:bold}} .total{{font-size:28px;font-weight:bold;color:#e74c3c;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>⚠️ Subscription Expired</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your <strong>{plan_type}</strong> subscription has expired. A 5% late penalty has been applied.</p>
+    <p>Fee: <span class="fee">₦{fee:,.2f}</span></p>
+    <p>Total Due (incl. penalty): <span class="total">₦{total_due:,.2f}</span></p>
+    <p>Renew now in the JardX app to restore your {plan_type} benefits.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+        print(f"SUCCESS: Penalty email sent to {receiver_email}")
+    except Exception as e:
+        print(f"ERROR sending penalty email: {e}")
+
+
+def send_installment_reminder_email(receiver_email, user_name, property_name, monthly, penalty=0, days=7):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    urgency = "⚠️ " if days <= 3 else ""
+    subject = f"{urgency}Reminder: Installment Due in {days} Days - {property_name}"
+    total = monthly + penalty
+    penalty_line = f"<p>Late Penalty: ₦{penalty:,.2f}</p>" if penalty else ""
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#ff6900}} .amount{{font-size:24px;font-weight:bold;color:#ff6900;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>{'⏰ Payment Reminder' if days <= 3 else 'Payment Reminder'}</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your next installment for <strong>{property_name}</strong> is due in <strong>{days} days</strong>.</p>
+    <p>Monthly Amount: <span class="amount">₦{monthly:,.2f}</span></p>
+    {penalty_line}
+    <p>Total Due: <span class="amount">₦{total:,.2f}</span></p>
+    {"<p><strong>Note:</strong> Late payment incurs a 5% penalty on the monthly amount.</p>" if days > 3 else '<p><strong>Urgent:</strong> Pay now to avoid late penalties.</p>'}
+    <p>Log into JardX to make your payment or enable auto-debit.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+        print(f"SUCCESS: Installment reminder sent to {receiver_email}")
+    except Exception as e:
+        print(f"ERROR sending installment reminder: {e}")
+
+
+def send_installment_penalty_email(receiver_email, user_name, property_name, monthly, penalty):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    subject = f"⚠️ Late Penalty Applied - {property_name}"
+    total = monthly + penalty
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#e74c3c}} .total{{font-size:28px;font-weight:bold;color:#e74c3c;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>⚠️ Late Penalty Applied</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your installment for <strong>{property_name}</strong> is overdue. A 5% penalty (₦{penalty:,.2f}) has been added.</p>
+    <p>Monthly Due: ₦{monthly:,.2f}<br>Penalty: ₦{penalty:,.2f}</p>
+    <p>Total Due Now: <span class="total">₦{total:,.2f}</span></p>
+    <p>Pay now to avoid further penalties.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+        print(f"SUCCESS: Installment penalty email sent to {receiver_email}")
+    except Exception as e:
+        print(f"ERROR sending installment penalty: {e}")
+
+
+def send_installment_auto_debit_failed_email(receiver_email, user_name, property_name, total_due):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    subject = f"⚠️ Auto-Debit Failed - {property_name}"
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#e74c3c}} .amount{{font-size:24px;font-weight:bold;color:#e74c3c}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>⚠️ Auto-Debit Failed</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>We attempted to auto-deduct your installment for <strong>{property_name}</strong> but your wallet balance was insufficient.</p>
+    <p>Amount Due: <span class="amount">₦{total_due:,.2f}</span></p>
+    <p>Auto-debit has been disabled. Please top up your wallet and pay manually, or re-enable auto-debit.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+    except Exception as e:
+        print(f"ERROR sending auto-debit failed: {e}")
+
+
+def send_jardkidz_reminder_email(receiver_email, user_name, child_name, monthly, penalty=0, days=7):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    urgency = "⚠️ " if days <= 3 else ""
+    subject = f"{urgency}Reminder: JardKidz Contribution Due in {days} Days"
+    total = monthly + penalty
+    penalty_line = f"<p>Late Penalty: ₦{penalty:,.2f}</p>" if penalty else ""
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#ff6900}} .amount{{font-size:24px;font-weight:bold;color:#ff6900;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>JardKidz Contribution Reminder</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your JardKidz contribution for <strong>{child_name}</strong> is due in <strong>{days} days</strong>.</p>
+    <p>Monthly Amount: <span class="amount">₦{monthly:,.2f}</span></p>
+    {penalty_line}
+    <p>Total Due: <span class="amount">₦{total:,.2f}</span></p>
+    {"<p>Log into JardX to make your contribution or enable auto-debit.</p>" if days > 3 else '<p><strong>Urgent:</strong> Pay now to avoid late penalties.</p>'}
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+    except Exception as e:
+        print(f"ERROR sending jardkidz reminder: {e}")
+
+
+def send_jardkidz_penalty_email(receiver_email, user_name, child_name, monthly, penalty):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    subject = f"⚠️ Late Penalty Applied - JardKidz ({child_name})"
+    total = monthly + penalty
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#e74c3c}} .total{{font-size:28px;font-weight:bold;color:#e74c3c;margin:20px 0}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>⚠️ Late Penalty Applied</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>Your JardKidz contribution for <strong>{child_name}</strong> is overdue. A 5% penalty (₦{penalty:,.2f}) has been added.</p>
+    <p>Monthly Due: ₦{monthly:,.2f}<br>Penalty: ₦{penalty:,.2f}</p>
+    <p>Total Due Now: <span class="total">₦{total:,.2f}</span></p>
+    <p>Top up now to avoid further penalties.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+    except Exception as e:
+        print(f"ERROR sending jardkidz penalty: {e}")
+
+
+def send_subscription_auto_debit_failed_email(receiver_email, user_name, plan_type, fee):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    subject = f"⚠️ Auto-Renewal Failed - {plan_type} Subscription"
+
+    html = f"""<html><head><style>
+    body{{font-family:Arial,sans-serif;background:#f4f4f4;color:#333;padding:20px}}
+    .container{{background:#fff;padding:30px;border-radius:10px;max-width:600px;margin:0 auto}}
+    h1{{color:#e74c3c}} .amount{{font-size:24px;font-weight:bold;color:#e74c3c}}
+    .footer{{margin-top:30px;font-size:12px;color:#888;text-align:center}}
+    </style></head><body>
+    <div class="container">
+    <h1>⚠️ Auto-Renewal Failed</h1>
+    <p>Hello <strong>{user_name}</strong>,</p>
+    <p>We attempted to auto-renew your <strong>{plan_type}</strong> subscription but your wallet balance was insufficient.</p>
+    <p>Amount Due: <span class="amount">₦{fee:,.2f}</span></p>
+    <p>Auto-renewal has been disabled. Please top up your wallet and renew manually, or re-enable auto-renewal.</p>
+    <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+    </div></body></html>"""
+
+    try:
+        resend.Emails.send({"from": sender, "to": [receiver_email], "subject": subject, "html": html})
+    except Exception as e:
+        print(f"ERROR sending sub auto-debit failed: {e}")
 
 
 def send_push_notification_to_user(user_doc: dict, title: str, body: str, data_payload: dict = None):

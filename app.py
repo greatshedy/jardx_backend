@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
-from routes import users, admin, payment, finance, portfolio, jardproc
+from apscheduler.schedulers.background import BackgroundScheduler
+from routes import users, admin, payment, finance, portfolio, jardproc, withdraw
 from routes.test_runner.routes import router as test_runner_router
 from routes.db_tool import router as db_tool_router
 
@@ -125,6 +126,7 @@ app.include_router(payment.router)
 app.include_router(finance.router)
 app.include_router(portfolio.router)
 app.include_router(jardproc.router)
+app.include_router(withdraw.router)
 app.include_router(test_runner_router)
 app.include_router(db_tool_router)
 
@@ -159,3 +161,11 @@ def keep_alive_loop():
 @app.on_event("startup")
 async def startup_event():
     threading.Thread(target=keep_alive_loop, daemon=True).start()
+    try:
+        from scheduler import run_all
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(run_all, 'interval', seconds=60, id='run_all_tasks')
+        scheduler.start()
+        logger.info("APScheduler started - running every 60 seconds")
+    except Exception as e:
+        logger.error(f"Failed to start APScheduler: {e}")

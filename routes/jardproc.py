@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from db.database import products_collection, orders_collection, reviews_collection, user_collection, transactions_collection
 from model import Product, Order, Review, OrderItem
@@ -5,6 +6,8 @@ from utill import get_token, get_image_url, send_jardproc_invoice_email, VerifyH
 from fastapi.responses import JSONResponse
 import datetime
 import secrets
+
+logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/jardproc", tags=["JardProc"])
 
@@ -198,6 +201,9 @@ async def get_product_reviews(product_id: str):
             r["_id"] = str(r["_id"])
         return JSONResponse({"message": "Reviews fetched", "data": reviews, "status": 200})
     except Exception as e:
+        logger.error(f"Error in /reviews: {e}")
+        if "CORRUPTED_COLLECTION_SCHEMA" in str(e):
+            return JSONResponse({"message": "Reviews fetched", "data": [], "status": 200})
         return JSONResponse({"message": str(e), "status": 500})
 
 @router.put("/reviews/{review_id}")

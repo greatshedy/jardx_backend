@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import JSONResponse
-from db.database import user_collection, house_collection, portfolio_collection, transactions_collection
+from db.database import user_collection, house_collection, portfolio_collection, transactions_collection, sub_settings_collection
 from model import PropertyPurchase, PortfolioModel
 from utill import get_token, send_purchase_email, reassemble_base64_string, process_referral_logic, process_partner_commission
+from scheduler import get_settings, _encrypt_pin
 import datetime
 import secrets
 from dateutil.relativedelta import relativedelta
@@ -67,7 +68,12 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "next_payment_date": "",
                 "status": "Completed",
                 "house_image": house.get("house_image", [])[0] if house.get("house_image") else "",
-                "created_at": datetime.datetime.utcnow().isoformat()
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "auto_debit": False,
+                "encrypted_pin": "",
+                "penalty_amount": 0.0,
+                "reminder_7d_sent": False,
+                "reminder_3d_sent": False
             }
 
         
@@ -105,17 +111,27 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "remaining_balance": remaining_balance,
                 "monthly_payment": monthly_payment,
                 "duration_months": num_months,
-                "months_paid": 0,  # 0 months paid because this is just downpayment
+                "months_paid": 0,
                 "next_payment_date": next_payment_date,
                 "status": "Active",
                 "house_image": house.get("house_image", [])[0] if house.get("house_image") else "",
-                "created_at": datetime.datetime.utcnow().isoformat()
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "auto_debit": False,
+                "encrypted_pin": "",
+                "penalty_amount": 0.0,
+                "reminder_7d_sent": False,
+                "reminder_3d_sent": False
             }
 
 
-        # Deduct wallet balance
-        new_balance = current_balance - purchase.amount_to_pay
-        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        # Deduct wallet balance (atomic)
+        user_collection.update_one(
+            {"_id": user_id, "wallet_balance": {"$gte": purchase.amount_to_pay}},
+            {"$inc": {"wallet_balance": -purchase.amount_to_pay}}
+        )
+        
+        updated_user = user_collection.find_one({"_id": user_id})
+        actual_balance = float(updated_user["wallet_balance"])
 
         # Record Portfolio Items
         result = portfolio_collection.insert_one(portfolio_item)
@@ -170,7 +186,7 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
         # Partner commission (10% direct, 5% indirect for partner referrers)
         process_partner_commission(user_id, purchase.amount_to_pay, user_collection, transactions_collection)
         
-        return JSONResponse(status_code=200, content={"message": "Purchase successful! Your portfolio has been updated."})
+        return JSONResponse(status_code=200, content={"message": "Purchase successful! Your portfolio has been updated.", "wallet_balance": actual_balance})
         
     except Exception as e:
         logger.error(f"Purchase Error: {e}")
@@ -326,6 +342,47 @@ def get_portfolio_item(portfolio_id: str, data: dict = Depends(get_token)):
         logger.error(f"Portfolio Item Fetch Error: {e}")
         return JSONResponse(status_code=500, content={"message": "Could not fetch estate details"})
 
+@router.post("/toggle-auto-debit/{portfolio_id}")
+def toggle_auto_debit(portfolio_id: str, payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        portfolio = portfolio_collection.find_one({"_id": portfolio_id, "user_id": user_id})
+        if not portfolio:
+            return JSONResponse(status_code=404, content={"message": "Portfolio not found"})
+        enable = payload.get("enable", False)
+        pin = payload.get("pin", "")
+        if enable:
+            if not pin or len(str(pin)) != 4:
+                return JSONResponse(status_code=400, content={"message": "Valid 4-digit PIN required"})
+            from utill import VerifyHashed
+            user = user_collection.find_one({"_id": user_id})
+            if not user or not user.get("transaction_pin"):
+                return JSONResponse(status_code=400, content={"message": "No transaction PIN set"})
+            try:
+                valid = VerifyHashed(user["transaction_pin"], str(pin))
+                if not valid:
+                    return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            except Exception:
+                return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            encrypted = _encrypt_pin(str(pin))
+            portfolio_collection.update_one(
+                {"_id": portfolio_id},
+                {"$set": {"auto_debit": True, "encrypted_pin": encrypted}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-debit enabled", "status": 200})
+        else:
+            portfolio_collection.update_one(
+                {"_id": portfolio_id},
+                {"$set": {"auto_debit": False, "encrypted_pin": ""}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-debit disabled", "status": 200})
+    except Exception as e:
+        logger.error(f"Toggle auto-debit error: {e}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+
 @router.post("/pay-installment/{portfolio_id}")
 def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payload: dict = None, data: dict = Depends(get_token)):
     try:
@@ -347,11 +404,12 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payloa
             num_months = int(payload["months"])
 
         monthly_base = float(portfolio.get("monthly_payment", 0))
-        total_due = monthly_base * num_months
+        penalty = float(portfolio.get("penalty_amount", 0))
+        total_due = (monthly_base * num_months) + penalty
         current_balance = float(user.get("wallet_balance", 0.0))
 
         if current_balance < total_due:
-            return JSONResponse(status_code=400, content={"message": f"Insufficient balance. You need ₦{total_due:,.2f} but have ₦{current_balance:,.2f}"})
+            return JSONResponse(status_code=400, content={"message": f"Insufficient balance. You need ₦{total_due:,.2f} (incl. ₦{penalty:,.2f} penalty) but have ₦{current_balance:,.2f}"})
 
         # Calculate everything BEFORE updating any records
         try:
@@ -385,7 +443,8 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payloa
                     "remaining_balance": max(0, remaining_balance),
                     "amount_paid": new_amount_paid,
                     "status": status,
-                    "next_payment_date": next_date
+                    "next_payment_date": next_date,
+                    "penalty_amount": 0
                 }}
             )
 
@@ -393,21 +452,28 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payloa
             transactions_collection.insert_one({
                 "tx_ref": f"PAY-{secrets.token_hex(6).upper()}",
                 "user_id": user_id,
-                "portfolio_id": portfolio_id, # Link to portfolio
-                "amount": total_due,
+                "portfolio_id": portfolio_id,
+                "amount": monthly_base * num_months,
+                "penalty_part": penalty,
+                "total_amount": total_due,
                 "gateway": "Wallet",
                 "type": "DEBIT",
                 "purpose": f"Installment ({num_months} mo): {portfolio['house_name']}",
                 "unit_sqm": portfolio.get("unit_sqm", "N/A"),
-                "house_image": "", 
+                "house_image": "",
                 "status": "SUCCESS",
                 "created_at": datetime.datetime.utcnow().isoformat(),
                 "months_covered": num_months
             })
             
-            # 3. Update wallet
-            new_balance = current_balance - total_due
-            user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+            # 3. Update wallet (atomic)
+            user_collection.update_one(
+                {"_id": user_id, "wallet_balance": {"$gte": total_due}},
+                {"$inc": {"wallet_balance": -total_due}}
+            )
+            
+            updated_user = user_collection.find_one({"_id": user_id})
+            actual_balance = float(updated_user["wallet_balance"])
 
             # 4. Partner commission on installment payments
             process_partner_commission(user_id, total_due, user_collection, transactions_collection)
@@ -424,7 +490,7 @@ def pay_installment(portfolio_id: str, background_tasks: BackgroundTasks, payloa
                 ""
             )
 
-            return JSONResponse(status_code=200, content={"message": "Installment payment successful!"})
+            return JSONResponse(status_code=200, content={"message": "Installment payment successful!", "wallet_balance": actual_balance})
 
         except Exception as inner_e:
             logger.error(f"Logic Error in Pay Installment (Step failure): {inner_e}")

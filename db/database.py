@@ -75,9 +75,43 @@ if "reviews" not in existing_collections:
 else:
     reviews_collection = db.get_collection("reviews")
 
+if "reports" not in existing_collections:
+    try:
+        reports_collection = db.create_collection("reports")
+    except Exception as e:
+        print(f"Error creating reports collection: {e}")
+        reports_collection = db.get_collection("reports")
+else:
+    reports_collection = db.get_collection("reports")
+
 if "notifications" not in existing_collections:
     notifications_collection = db.create_collection("notifications")
 else:
     notifications_collection = db.get_collection("notifications")
+
+if "subscription_settings" not in existing_collections:
+    try:
+        sub_settings_collection = db.create_collection("subscription_settings")
+        sub_settings_collection.insert_one({
+            "testing_mode": False,
+            "testing_duration_minutes": 3,
+            "vendor_fee": 25000,
+            "partner_fee": 100000,
+            "sub_duration_months": 1,
+            "penalty_percentage": 5
+        })
+    except Exception:
+        sub_settings_collection = db.get_collection("subscription_settings")
+else:
+    sub_settings_collection = db.get_collection("subscription_settings")
+
+if "withdraw_requests" not in existing_collections:
+    try:
+        withdraw_requests_collection = db.create_collection("withdraw_requests")
+    except Exception as e:
+        print(f"Error creating withdraw_requests collection: {e}")
+        withdraw_requests_collection = db.get_collection("withdraw_requests")
+else:
+    withdraw_requests_collection = db.get_collection("withdraw_requests")
 
 print("Astra DB connection initialized successfully.")

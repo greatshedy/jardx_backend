@@ -36,8 +36,6 @@ mock_vendors = [
         "certificate": "https://images.unsplash.com/photo-1589330273594-fade1ee91647?q=80&w=300&auto=format&fit=crop",
         "accountType": "vendor",
         "status": "verified",
-        "rating": 4.5,
-        "reviews_count": 132,
         "created_at": datetime.datetime.utcnow().isoformat()
     },
     {
@@ -54,8 +52,6 @@ mock_vendors = [
         "certificate": "https://images.unsplash.com/photo-1589330273594-fade1ee91647?q=80&w=300&auto=format&fit=crop",
         "accountType": "vendor",
         "status": "verified",
-        "rating": 4.2,
-        "reviews_count": 98,
         "created_at": datetime.datetime.utcnow().isoformat()
     },
     {
@@ -72,8 +68,6 @@ mock_vendors = [
         "certificate": "https://images.unsplash.com/photo-1589330273594-fade1ee91647?q=80&w=300&auto=format&fit=crop",
         "accountType": "vendor",
         "status": "unverified",
-        "rating": 4.8,
-        "reviews_count": 132,
         "created_at": datetime.datetime.utcnow().isoformat()
     }
 ]

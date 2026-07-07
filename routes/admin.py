@@ -10,7 +10,7 @@ import os
 import secrets
 import json
 import datetime
-from db.database import house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection
+from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection
 
 logger = logging.getLogger("jardx")
 
@@ -408,12 +408,81 @@ async def update_user(user_id: str, data: dict):
 @router.patch("/toggle-user-block/{user_id}")
 async def toggle_user_block(user_id: str, data: dict):
     try:
-        new_status = data.get("status") # 'Active' or 'Blocked'
-        user_collection.update_one({"_id": user_id}, {"$set": {"status": new_status}})
+        new_status = data.get("status")
+        reason = data.get("reason", "")
+        updates = {"status": new_status}
+        if new_status == "Blocked" and reason:
+            updates["block_reason"] = reason
+        elif new_status == "Active":
+            updates["block_reason"] = ""
+        user_collection.update_one({"_id": user_id}, {"$set": updates})
+
+        if new_status == "Blocked":
+            notifications_collection.insert_one({
+                "user_id": user_id,
+                "title": "Account Restricted",
+                "body": f"Your account has been restricted. Reason: {reason or 'No reason provided'}. Please contact customer care.",
+                "type": "BLOCK",
+                "is_read": False,
+                "created_at": datetime.datetime.utcnow().isoformat()
+            })
+
         logger.info(f"Admin changed user status for {user_id} to {new_status}")
         return JSONResponse({"message": f"User status changed to {new_status}", "status": 200})
     except Exception as e:
         logger.error(f"Error toggling user block for {user_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.get("/reports")
+async def get_all_reports():
+    try:
+        reports = list(reports_collection.find({}).sort({"created_at": -1}))
+        for r in reports:
+            r["_id"] = str(r["_id"])
+            reporter = user_collection.find_one({"_id": r.get("reporter_id")}, projection={"user_name": 1, "email": 1})
+            r["reporter"] = {
+                "name": reporter.get("user_name", "Unknown") if reporter else "Unknown",
+                "email": reporter.get("email", "") if reporter else ""
+            }
+        return JSONResponse({"status": 200, "data": reports})
+    except Exception as e:
+        logger.error(f"Error in /reports: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/resolve-report/{report_id}")
+async def resolve_report(report_id: str, data: dict):
+    try:
+        action = data.get("action", "resolved")
+        reports_collection.update_one(
+            {"_id": report_id},
+            {"$set": {"status": action, "resolved_at": datetime.datetime.utcnow().isoformat()}}
+        )
+        return JSONResponse({"message": f"Report {action}", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /resolve-report: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/send-warning")
+async def send_warning(payload: dict):
+    try:
+        user_id = payload.get("user_id")
+        message = payload.get("message")
+        if not user_id or not message:
+            return JSONResponse({"message": "User ID and message are required", "status": 400})
+
+        notifications_collection.insert_one({
+            "user_id": user_id,
+            "title": "Warning",
+            "body": message,
+            "type": "WARNING",
+            "acknowledged": False,
+            "is_read": False,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+
+        return JSONResponse({"message": "Warning sent successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /send-warning: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
 @router.delete("/delete-user/{user_id}")
@@ -864,3 +933,90 @@ async def admin_get_products(category: str = "All"):
         return JSONResponse({"message": "Products fetched", "data": products, "status": 200})
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
+
+
+# ─────────────────────────────────────────────
+# SUBSCRIPTION SETTINGS (Admin Configurable)
+# ─────────────────────────────────────────────
+
+@router.get("/subscription-settings")
+async def get_subscription_settings():
+    try:
+        from scheduler import get_settings
+        settings = get_settings()
+        settings.pop("_id", None)
+        return JSONResponse({"message": "Settings fetched", "data": settings, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching subscription settings: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.put("/subscription-settings")
+async def update_subscription_settings(payload: dict):
+    try:
+        existing = sub_settings_collection.find_one({})
+        if not existing:
+            existing = {}
+        existing.pop("_id", None)
+        allowed = [
+            "vendor_fee", "partner_fee",
+            "sub_duration_months", "penalty_percentage"
+        ]
+        for key in allowed:
+            if key in payload:
+                existing[key] = payload[key]
+        if existing.get("vendor_fee"):
+            existing["vendor_fee"] = float(existing["vendor_fee"])
+        if existing.get("partner_fee"):
+            existing["partner_fee"] = float(existing["partner_fee"])
+        if existing.get("sub_duration_months"):
+            existing["sub_duration_months"] = int(existing["sub_duration_months"])
+        if existing.get("penalty_percentage"):
+            existing["penalty_percentage"] = float(existing["penalty_percentage"])
+        sub_settings_collection.replace_one({}, existing, upsert=True)
+        return JSONResponse({"message": "Settings updated", "data": existing, "status": 200})
+    except Exception as e:
+        logger.error(f"Error updating subscription settings: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/force-check-subscriptions")
+async def force_check_subscriptions():
+    try:
+        from scheduler import run_all
+        import threading
+        thread = threading.Thread(target=run_all, daemon=True)
+        thread.start()
+        return JSONResponse({"message": "Subscription check triggered in background", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in force-check: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.get("/subscriptions-list")
+async def get_subscriptions_list(type: str = "all"):
+    try:
+        vendors = list(vendors_collection.find({}))
+        partners = list(partners_collection.find({}))
+        result = []
+        for v in vendors:
+            v["_id"] = str(v["_id"])
+            v["subscription_type"] = "vendor"
+            user = user_collection.find_one({"_id": v["user_id"]}, projection={"user_name": 1, "email": 1})
+            if user:
+                v["user_info"] = {"name": user.get("user_name"), "email": user.get("email")}
+            result.append(v)
+        for p in partners:
+            p["_id"] = str(p["_id"])
+            p["subscription_type"] = "partner"
+            user = user_collection.find_one({"_id": p["user_id"]}, projection={"user_name": 1, "email": 1})
+            if user:
+                p["user_info"] = {"name": user.get("user_name"), "email": user.get("email")}
+            result.append(p)
+        return JSONResponse({"message": "Subscriptions fetched", "data": result, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching subscriptions list: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+

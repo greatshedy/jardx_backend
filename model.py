@@ -144,7 +144,9 @@ class Order(BaseModel):
     created_at: str = ""
 
 class Review(BaseModel):
-    product_id: str
+    product_id: str = ""
+    vendor_id: str = ""
+    vendor_name: str = ""
     user_id: str
     user_name: str
     rating: int

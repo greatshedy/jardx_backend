@@ -1,11 +1,13 @@
 from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Request, UploadFile, File
-from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection, notifications_collection
+from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection, notifications_collection, sub_settings_collection, reports_collection, reviews_collection, withdraw_requests_collection
 import datetime
 import secrets
 from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary
 
 from fastapi.responses import JSONResponse, Response
 from utill import generate_otp,get_token,send_email
+from scheduler import get_settings, _encrypt_pin, _duration_delta
+from dateutil.relativedelta import relativedelta
 import base64
 from starlette import status
 import logging
@@ -29,22 +31,29 @@ async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
             
-        fee = 25000
+        settings = get_settings()
+        fee = float(settings.get("vendor_fee", 25000))
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
             
         photo_url = upload_to_cloudinary(vendor.photo, f"vendors/photos/{user_id}")
         cert_url = upload_to_cloudinary(vendor.certificate, f"vendors/certs/{user_id}")
             
+        delta = _duration_delta(settings)
+        if settings.get("testing_mode"):
+            expiry = (datetime.datetime.utcnow() + delta).isoformat()
+        else:
+            expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+
         vendor_record = vendor.dict()
         vendor_record["user_id"] = user_id
         vendor_record["photo"] = photo_url
         vendor_record["certificate"] = cert_url
-        vendor_record["accountType"] = "vendor" # Ensure correct type
+        vendor_record["accountType"] = "vendor"
         vendor_record["status"] = "unverified"
         vendor_record["created_at"] = datetime.datetime.utcnow().isoformat()
         vendor_record["subscription_start"] = datetime.datetime.utcnow().isoformat()
-        vendor_record["subscription_expiry"] = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
+        vendor_record["subscription_expiry"] = expiry
         vendor_record["subscription_status"] = "active"
         
         vendors_collection.insert_one(vendor_record)
@@ -156,11 +165,16 @@ async def renew_vendor_subscription(data: dict = Depends(get_token)):
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
         
-        fee = 25000
+        settings = get_settings()
+        fee = float(settings.get("vendor_fee", 25000))
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
         
-        new_expiry = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
+        delta = _duration_delta(settings)
+        if settings.get("testing_mode"):
+            new_expiry = (datetime.datetime.utcnow() + delta).isoformat()
+        else:
+            new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
         
         vendors_collection.update_one(
             {"user_id": user_id},
@@ -170,8 +184,13 @@ async def renew_vendor_subscription(data: dict = Depends(get_token)):
             }}
         )
         
-        new_balance = float(user_data["wallet_balance"]) - fee
-        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        user_collection.update_one(
+            {"_id": user_id, "wallet_balance": {"$gte": fee}},
+            {"$inc": {"wallet_balance": -fee}}
+        )
+        
+        updated_user = user_collection.find_one({"_id": user_id})
+        actual_balance = float(updated_user["wallet_balance"])
         
         transactions_collection.insert_one({
             "tx_ref": f"SUB-{secrets.token_hex(6).upper()}",
@@ -189,29 +208,242 @@ async def renew_vendor_subscription(data: dict = Depends(get_token)):
             "data": {
                 "subscription_expiry": new_expiry,
                 "subscription_status": "active",
-                "wallet_balance": new_balance,
+                "wallet_balance": actual_balance,
             }
         }, status_code=200)
     except Exception as e:
         logger.error(f"Error in /vendor-subscription-renew: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
+@router.post("/toggle-vendor-auto-debit")
+async def toggle_vendor_auto_debit(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        vendor = vendors_collection.find_one({"user_id": user_id})
+        if not vendor:
+            return JSONResponse(status_code=404, content={"message": "Vendor record not found"})
+        enable = payload.get("enable", False)
+        pin = payload.get("pin", "")
+        if enable:
+            if not pin or len(str(pin)) != 4:
+                return JSONResponse(status_code=400, content={"message": "Valid 4-digit PIN required"})
+            user = user_collection.find_one({"_id": user_id})
+            if not user or not user.get("transaction_pin"):
+                return JSONResponse(status_code=400, content={"message": "No transaction PIN set"})
+            try:
+                valid = VerifyHashed(user["transaction_pin"], str(pin))
+                if not valid:
+                    return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            except Exception:
+                return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            encrypted = _encrypt_pin(str(pin))
+            vendors_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"auto_debit": True, "encrypted_pin": encrypted}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-renewal enabled", "status": 200})
+        else:
+            vendors_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"auto_debit": False, "encrypted_pin": ""}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-renewal disabled", "status": 200})
+    except Exception as e:
+        logger.error(f"Toggle vendor auto-debit error: {e}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
 @router.get("/vendors")
 async def get_all_vendors():
     try:
         vendors = list(vendors_collection.find({}))
+        all_vendor_reviews = list(reviews_collection.find({"vendor_id": {"$ne": ""}}))
+        rating_map = {}
+        for r in all_vendor_reviews:
+            vid = str(r.get("vendor_id", ""))
+            if not vid:
+                continue
+            if vid not in rating_map:
+                rating_map[vid] = {"total": 0, "sum": 0}
+            rating_map[vid]["total"] += 1
+            try:
+                rating_map[vid]["sum"] += int(r.get("rating", 0))
+            except (TypeError, ValueError):
+                pass
         for v in vendors:
             v["_id"] = str(v["_id"])
-            if "rating" not in v:
-                v["rating"] = 4.5
-            if "reviews_count" not in v:
-                v["reviews_count"] = 132
             if not v.get("photo"):
                 v["photo"] = "https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=200"
+            vid = str(v.get("user_id", ""))
+            if vid in rating_map and rating_map[vid]["total"] > 0:
+                avg = round(rating_map[vid]["sum"] / rating_map[vid]["total"], 1)
+                v["average_rating"] = avg
+                v["total_reviews"] = rating_map[vid]["total"]
+            else:
+                v["average_rating"] = None
+                v["total_reviews"] = 0
         return JSONResponse({"status": 200, "data": vendors}, status_code=200)
     except Exception as e:
         logger.error(f"Error in /vendors: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.get("/vendors/{vendor_id}/rating")
+async def get_vendor_rating(vendor_id: str):
+    try:
+        reviews = list(reviews_collection.find({"vendor_id": vendor_id}))
+        total = len(reviews)
+        distribution = {5: 0, 4: 0, 3: 0, 2: 0, 1: 0}
+        total_rating = 0
+        for r in reviews:
+            try:
+                star = int(r.get("rating", 0))
+            except (TypeError, ValueError):
+                continue
+            if star in distribution:
+                distribution[star] += 1
+            total_rating += star
+        average = round(total_rating / total, 1) if total > 0 else 0
+        return JSONResponse({
+            "data": {"average": average, "total": total, "distribution": distribution},
+            "status": 200
+        })
+    except Exception as e:
+        logger.error(f"Error in /vendors/{{vendor_id}}/rating: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.get("/vendors/{vendor_id}/reviews")
+async def get_vendor_reviews(vendor_id: str):
+    try:
+        reviews = list(
+            reviews_collection.find({"vendor_id": vendor_id}).sort({"created_at": -1})
+        )
+        for r in reviews:
+            r["_id"] = str(r["_id"])
+        return JSONResponse({"message": "Reviews fetched", "data": reviews, "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /vendors/{{vendor_id}}/reviews: {e}")
+        if "CORRUPTED_COLLECTION_SCHEMA" in str(e):
+            return JSONResponse({"message": "Reviews fetched", "data": [], "status": 200})
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/vendors/{vendor_id}/reviews")
+async def add_vendor_review(vendor_id: str, payload: dict, user_payload: dict = Depends(get_token)):
+    try:
+        user_id = user_payload.get("id")
+        user = user_collection.find_one({"_id": user_id})
+
+        try:
+            rating_value = int(payload.get("rating", 0))
+        except (TypeError, ValueError):
+            return JSONResponse({"message": "Rating must be a number", "status": 400})
+        if rating_value < 1 or rating_value > 5:
+            return JSONResponse({"message": "Rating must be between 1 and 5", "status": 400})
+
+        comment = (payload.get("comment") or "").strip()
+        if not comment:
+            return JSONResponse({"message": "Comment is required", "status": 400})
+
+        vendor = vendors_collection.find_one({"user_id": vendor_id})
+        vendor_name = (vendor.get("fullName") or vendor.get("name")) if vendor else ""
+
+        review_dict = {
+            "product_id": "",
+            "vendor_id": vendor_id,
+            "vendor_name": vendor_name,
+            "user_id": user_id,
+            "user_name": user.get("user_name", "User") if user else "User",
+            "rating": rating_value,
+            "comment": comment,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        reviews_collection.insert_one(review_dict)
+        return JSONResponse({"message": "Review added successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in POST /vendors/{{vendor_id}}/reviews: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.put("/vendors/reviews/{review_id}")
+async def update_vendor_review(review_id: str, payload: dict, user_payload: dict = Depends(get_token)):
+    try:
+        user_id = user_payload.get("id")
+        existing = reviews_collection.find_one({"_id": review_id})
+        if not existing:
+            return JSONResponse({"message": "Review not found", "status": 404})
+        if str(existing.get("user_id")) != str(user_id):
+            return JSONResponse({"message": "You can only edit your own review", "status": 403})
+        if not existing.get("vendor_id"):
+            return JSONResponse({"message": "Not a vendor review", "status": 400})
+
+        try:
+            rating_value = int(payload.get("rating", 0))
+        except (TypeError, ValueError):
+            return JSONResponse({"message": "Rating must be a number", "status": 400})
+        if rating_value < 1 or rating_value > 5:
+            return JSONResponse({"message": "Rating must be between 1 and 5", "status": 400})
+
+        comment = (payload.get("comment") or "").strip()
+        if not comment:
+            return JSONResponse({"message": "Comment is required", "status": 400})
+
+        reviews_collection.update_one(
+            {"_id": review_id},
+            {"$set": {
+                "rating": rating_value,
+                "comment": comment,
+                "updated_at": datetime.datetime.utcnow().isoformat()
+            }}
+        )
+        return JSONResponse({"message": "Review updated successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in PUT /vendors/reviews/{{review_id}}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.delete("/vendors/reviews/{review_id}")
+async def delete_vendor_review(review_id: str, user_payload: dict = Depends(get_token)):
+    try:
+        user_id = user_payload.get("id")
+        existing = reviews_collection.find_one({"_id": review_id})
+        if not existing:
+            return JSONResponse({"message": "Review not found", "status": 404})
+        if str(existing.get("user_id")) != str(user_id):
+            return JSONResponse({"message": "You can only delete your own review", "status": 403})
+        if not existing.get("vendor_id"):
+            return JSONResponse({"message": "Not a vendor review", "status": 400})
+        reviews_collection.delete_one({"_id": review_id})
+        return JSONResponse({"message": "Review deleted successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in DELETE /vendors/reviews/{{review_id}}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/report-vendor")
+async def report_vendor(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        vendor_id = payload.get("vendor_id")
+        reason = payload.get("reason")
+        custom_reason = payload.get("custom_reason", "")
+
+        if not vendor_id or not reason:
+            return JSONResponse({"message": "Vendor ID and reason are required", "status": 400})
+
+        reports_collection.insert_one({
+            "reporter_id": user_id,
+            "vendor_id": vendor_id,
+            "reason": reason,
+            "custom_reason": custom_reason,
+            "status": "pending",
+            "created_at": datetime.datetime.utcnow().isoformat()
+        })
+        return JSONResponse({"message": "Report submitted successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /report-vendor: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
 
 @router.post("/update-vendor-photo")
 async def update_vendor_photo(payload: dict, data: dict = Depends(get_token)):
@@ -333,22 +565,29 @@ async def partner_register(partner: JardAccount, data: dict = Depends(get_token)
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
             
-        fee = 100000
+        settings = get_settings()
+        fee = float(settings.get("partner_fee", 100000))
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
             
         photo_url = upload_to_cloudinary(partner.photo, f"partners/photos/{user_id}")
         cert_url = upload_to_cloudinary(partner.certificate, f"partners/certs/{user_id}")
             
+        delta = _duration_delta(settings)
+        if settings.get("testing_mode"):
+            expiry = (datetime.datetime.utcnow() + delta).isoformat()
+        else:
+            expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+
         partner_record = partner.dict()
         partner_record["user_id"] = user_id
         partner_record["photo"] = photo_url
         partner_record["certificate"] = cert_url
-        partner_record["accountType"] = "partner" # Ensure correct type
+        partner_record["accountType"] = "partner"
         partner_record["status"] = "unverified"
         partner_record["created_at"] = datetime.datetime.utcnow().isoformat()
         partner_record["subscription_start"] = datetime.datetime.utcnow().isoformat()
-        partner_record["subscription_expiry"] = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
+        partner_record["subscription_expiry"] = expiry
         partner_record["subscription_status"] = "active"
         
         partners_collection.insert_one(partner_record)
@@ -396,6 +635,202 @@ async def get_partner_details(data: dict = Depends(get_token)):
     except Exception as e:
         logger.error(f"Error in /partner-details: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.get("/partner-dashboard")
+async def get_partner_dashboard(data: dict = Depends(get_token)):
+    """
+    Aggregated payload for the Partner Dashboard screen.
+    Returns partner profile, earnings summary, monthly time-series chart,
+    referral summary, and per-referral activity.
+    """
+    try:
+        user_id = data["id"]
+        uid_str = str(user_id)
+
+        # --- 1. Partner profile ---
+        partner_record = partners_collection.find_one({"user_id": uid_str})
+        partner_payload = {}
+        if partner_record:
+            partner_record["_id"] = str(partner_record.get("_id", ""))
+            # Strip sensitive / large fields the dashboard doesn't need
+            partner_record.pop("certificate", None)
+            partner_payload = {
+                "fullName": partner_record.get("fullName", ""),
+                "email": partner_record.get("email", ""),
+                "phone": partner_record.get("phone", ""),
+                "address": partner_record.get("address", ""),
+                "skills": partner_record.get("skills", ""),
+                "profession": partner_record.get("profession", "") or partner_record.get("skills", ""),
+                "accountNumber": partner_record.get("accountNumber", ""),
+                "bankName": partner_record.get("bankName", ""),
+                "photo": partner_record.get("photo") or None,
+                "status": partner_record.get("status", "unverified"),
+                "description": partner_record.get("description", ""),
+                "workExperience": partner_record.get("workExperience", ""),
+                "created_at": partner_record.get("created_at", ""),
+                "subscription_start": partner_record.get("subscription_start", ""),
+                "subscription_expiry": partner_record.get("subscription_expiry", ""),
+                "subscription_status": partner_record.get("subscription_status", ""),
+            }
+
+        # --- 2. User wallet balance + referral_info ---
+        user_record = user_collection.find_one({"_id": uid_str}) or {}
+        wallet_balance = float(user_record.get("wallet_balance", 0) or 0)
+
+        referrals = list(user_collection.find(
+            {"referred_by": uid_str},
+            projection={"user_name": 1, "created_at": 1, "is_referral_active": 1}
+        ))
+
+        raw_credits = list(transactions_collection.find({
+            "user_id": uid_str,
+            "type": "CREDIT"
+        }))
+
+        def _is_bonus_purpose(purpose: str) -> bool:
+            p = (purpose or "").lower()
+            return (
+                "referral bonus" in p
+                or "partner direct commission" in p
+                or "partner indirect commission" in p
+            )
+
+        bonus_credits = [tx for tx in raw_credits if _is_bonus_purpose(tx.get("purpose", ""))]
+
+        partner_direct_earned = sum(
+            float(tx.get("amount", 0) or 0)
+            for tx in bonus_credits
+            if tx.get("purpose") == "Partner Direct Commission"
+        )
+        partner_indirect_earned = sum(
+            float(tx.get("amount", 0) or 0)
+            for tx in bonus_credits
+            if tx.get("purpose") == "Partner Indirect Commission"
+        )
+        referral_total = partner_direct_earned + partner_indirect_earned
+
+        # Total earnings = all qualifying bonus credits (incl. standard "Referral Bonus" if any)
+        total_earnings = sum(float(tx.get("amount", 0) or 0) for tx in bonus_credits)
+
+        # --- 3. Time-series: this month vs last month, plus 6-bar chart ---
+        now = datetime.datetime.utcnow()
+        first_of_this_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        first_of_last_month = (first_of_this_month - datetime.timedelta(days=1)).replace(day=1)
+
+        def _parse_dt(value):
+            if not value:
+                return None
+            try:
+                if isinstance(value, datetime.datetime):
+                    return value
+                return datetime.datetime.fromisoformat(str(value).replace("Z", ""))
+            except Exception:
+                return None
+
+        month_to_date = 0.0
+        previous_month = 0.0
+        daily_totals = {}
+
+        for tx in bonus_credits:
+            tx_dt = _parse_dt(tx.get("created_at", ""))
+            if not tx_dt:
+                continue
+            amt = float(tx.get("amount", 0) or 0)
+            if tx_dt >= first_of_this_month:
+                month_to_date += amt
+                daily_totals[tx_dt.day] = daily_totals.get(tx_dt.day, 0.0) + amt
+            elif tx_dt >= first_of_last_month and tx_dt < first_of_this_month:
+                previous_month += amt
+
+        # Sample 6 evenly-spaced days; if no activity that day, sum the prior window up to that day
+        sample_days = [1, 7, 13, 19, 25, 31]
+        monthly_chart = []
+        for d in sample_days:
+            if daily_totals.get(d):
+                monthly_chart.append({"day": d, "amount": round(daily_totals[d], 2)})
+            else:
+                # Sum all activity from previous sample day up to (and including) this day
+                prev_day = sample_days[sample_days.index(d) - 1] if sample_days.index(d) > 0 else 0
+                window_total = sum(
+                    v for k, v in daily_totals.items()
+                    if prev_day < k <= d
+                )
+                monthly_chart.append({"day": d, "amount": round(window_total, 2)})
+
+        if previous_month > 0:
+            trend_pct = round(((month_to_date - previous_month) / previous_month) * 100, 1)
+        else:
+            trend_pct = 0.0
+
+        # --- 4. Per-referral activity (best-effort match by user_name in purpose) ---
+        referral_activity = []
+        for ref in referrals:
+            ref_name = ref.get("user_name", "")
+            ref_id = str(ref.get("_id", ""))
+            ref_bonus = 0.0
+            for tx in bonus_credits:
+                purpose = tx.get("purpose", "") or ""
+                if ref_name and ref_name in purpose:
+                    ref_bonus += float(tx.get("amount", 0) or 0)
+            referral_activity.append({
+                "name": ref_name,
+                "bonus": round(ref_bonus, 2),
+                "is_active": bool(ref.get("is_referral_active", False)),
+                "created_at": ref.get("created_at", ""),
+                "_id": ref_id,
+            })
+
+        # --- 5. Referral summary block ---
+        referral_info = {
+            "code": user_record.get("referral_code", "") or "",
+            "is_active": bool(user_record.get("is_referral_active", False)),
+            "percentage": float(user_record.get("referral_percentage", 0) or 0),
+            "total_referrals": len(referrals),
+            "total_earned": round(total_earnings, 2),
+            "total_withdrawn": 0.0,
+            "partner_type": user_record.get("partner_type", "normal"),
+            "partner_direct_earned": round(partner_direct_earned, 2),
+            "partner_indirect_earned": round(partner_indirect_earned, 2),
+        }
+
+        # total_withdrawn: sum of DEBIT transactions with referral/partner commission purpose
+        raw_debits = list(transactions_collection.find({
+            "user_id": uid_str,
+            "type": "DEBIT"
+        }))
+        referral_info["total_withdrawn"] = round(
+            sum(
+                float(tx.get("amount", 0) or 0)
+                for tx in raw_debits
+                if "referral" in str(tx.get("purpose", "")).lower()
+                or "partner" in str(tx.get("purpose", "")).lower()
+            ),
+            2
+        )
+
+        payload = {
+            "partner": partner_payload,
+            "earnings": {
+                "total": round(total_earnings, 2),
+                "referral_total": round(referral_total, 2),
+                "referral_direct": round(partner_direct_earned, 2),
+                "referral_indirect": round(partner_indirect_earned, 2),
+                "available_balance": round(wallet_balance, 2),
+                "month_to_date": round(month_to_date, 2),
+                "previous_month": round(previous_month, 2),
+                "trend_pct": trend_pct,
+            },
+            "monthly_chart": monthly_chart,
+            "referrals": referral_info,
+            "referral_activity": referral_activity,
+        }
+
+        return JSONResponse({"status": 200, "data": payload}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /partner-dashboard: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
 
 @router.get("/partner-subscription")
 async def get_partner_subscription(data: dict = Depends(get_token)):
@@ -466,11 +901,16 @@ async def renew_partner_subscription(data: dict = Depends(get_token)):
         if not user_data:
             return JSONResponse({"message": "User not found", "status": 404})
         
-        fee = 100000
+        settings = get_settings()
+        fee = float(settings.get("partner_fee", 100000))
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
         
-        new_expiry = (datetime.datetime.utcnow() + datetime.timedelta(minutes=10)).isoformat()
+        delta = _duration_delta(settings)
+        if settings.get("testing_mode"):
+            new_expiry = (datetime.datetime.utcnow() + delta).isoformat()
+        else:
+            new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
         
         partners_collection.update_one(
             {"user_id": user_id},
@@ -480,8 +920,13 @@ async def renew_partner_subscription(data: dict = Depends(get_token)):
             }}
         )
         
-        new_balance = float(user_data["wallet_balance"]) - fee
-        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        user_collection.update_one(
+            {"_id": user_id, "wallet_balance": {"$gte": fee}},
+            {"$inc": {"wallet_balance": -fee}}
+        )
+        
+        updated_user = user_collection.find_one({"_id": user_id})
+        actual_balance = float(updated_user["wallet_balance"])
         
         transactions_collection.insert_one({
             "tx_ref": f"PSUB-{secrets.token_hex(6).upper()}",
@@ -499,12 +944,51 @@ async def renew_partner_subscription(data: dict = Depends(get_token)):
             "data": {
                 "subscription_expiry": new_expiry,
                 "subscription_status": "active",
-                "wallet_balance": new_balance,
+                "wallet_balance": actual_balance,
             }
         }, status_code=200)
     except Exception as e:
         logger.error(f"Error in /partner-subscription-renew: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+@router.post("/toggle-partner-auto-debit")
+async def toggle_partner_auto_debit(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        partner = partners_collection.find_one({"user_id": user_id})
+        if not partner:
+            return JSONResponse(status_code=404, content={"message": "Partner record not found"})
+        enable = payload.get("enable", False)
+        pin = payload.get("pin", "")
+        if enable:
+            if not pin or len(str(pin)) != 4:
+                return JSONResponse(status_code=400, content={"message": "Valid 4-digit PIN required"})
+            user = user_collection.find_one({"_id": user_id})
+            if not user or not user.get("transaction_pin"):
+                return JSONResponse(status_code=400, content={"message": "No transaction PIN set"})
+            try:
+                valid = VerifyHashed(user["transaction_pin"], str(pin))
+                if not valid:
+                    return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            except Exception:
+                return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            encrypted = _encrypt_pin(str(pin))
+            partners_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"auto_debit": True, "encrypted_pin": encrypted}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-renewal enabled", "status": 200})
+        else:
+            partners_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"auto_debit": False, "encrypted_pin": ""}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-renewal disabled", "status": 200})
+    except Exception as e:
+        logger.error(f"Toggle partner auto-debit error: {e}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
 
 @router.post("/update-partner-photo")
 async def update_partner_photo(payload: dict, data: dict = Depends(get_token)):
@@ -1006,12 +1490,32 @@ async def Home(data: dict = Depends(get_token)):
             "partner_indirect_earned": partner_indirect_earned
         }
 
+        is_blocked = user_data.get("status") == "Blocked"
+        block_reason = user_data.get("block_reason", "")
+        warnings_list = []
+        try:
+            raw_warnings = list(notifications_collection.find(
+                {"user_id": uid_str, "type": "WARNING", "acknowledged": {"$ne": True}}
+            ).sort({"created_at": -1}))
+            for w in raw_warnings:
+                warnings_list.append({
+                    "_id": str(w["_id"]),
+                    "message": w.get("body", w.get("message", "")),
+                    "created_at": w.get("created_at", ""),
+                    "acknowledged": w.get("acknowledged", False)
+                })
+        except Exception as warn_err:
+            logger.warning(f"Could not fetch warnings: {warn_err}")
+
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
                 "message": "user data",
                 "data": user_data,
-                "has_pin": has_pin
+                "has_pin": has_pin,
+                "is_blocked": is_blocked,
+                "block_reason": block_reason,
+                "warnings": warnings_list
             },
         )
 
@@ -1088,6 +1592,81 @@ async def check_pin(data: dict = Depends(get_token)):
         logger.error(f"Error in /check-pin: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
+
+@router.post("/send-pin-reset-otp")
+async def send_pin_reset_otp(data: dict = Depends(get_token), background_tasks: BackgroundTasks = BackgroundTasks()):
+    try:
+        user_id = data["id"]
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404})
+            
+        email = user.get("email")
+        if not email:
+            return JSONResponse({"message": "No email on record", "status": 400})
+            
+        now = int(time.time())
+        
+        last_sent = user.get("pin_reset_otp_last_sent")
+        if last_sent and isinstance(last_sent, (int, float)):
+            if now - last_sent < 30:
+                remaining = 30 - (now - last_sent)
+                return JSONResponse({
+                    "message": f"Please wait {remaining} seconds before requesting another OTP",
+                    "status": 429
+                })
+        
+        otp = generate_otp()
+        expiry = now + 300
+        user_collection.update_one({"_id": user_id}, {"$set": {
+            "pin_reset_otp": otp,
+            "pin_reset_otp_expiry": expiry,
+            "pin_reset_otp_last_sent": now
+        }})
+        
+        background_tasks.add_task(send_email, email, otp)
+        
+        return JSONResponse({"message": "OTP sent to your email", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /send-pin-reset-otp: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/verify-pin-reset-otp")
+async def verify_pin_reset_otp(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404})
+            
+        otp = str(payload.get("otp", ""))
+        if not otp:
+            return JSONResponse({"message": "OTP is required", "status": 400})
+            
+        stored_otp = str(user.get("pin_reset_otp", ""))
+        expiry = user.get("pin_reset_otp_expiry")
+        
+        if not stored_otp or not expiry:
+            return JSONResponse({"message": "No OTP requested. Please request a new one.", "status": 400})
+            
+        now = int(time.time())
+        if now > int(expiry):
+            return JSONResponse({"message": "OTP has expired. Please request a new one.", "status": 400})
+            
+        if otp != stored_otp:
+            return JSONResponse({"message": "Invalid OTP", "status": 401})
+            
+        user_collection.update_one({"_id": user_id}, {"$unset": {
+            "pin_reset_otp": "",
+            "pin_reset_otp_expiry": "",
+            "pin_reset_otp_last_sent": ""
+        }})
+        
+        return JSONResponse({"message": "OTP verified successfully", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /verify-pin-reset-otp: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
 
 
 # User listing endpoint
@@ -1377,6 +1956,7 @@ async def save_notification_settings(payload: dict, data: dict = Depends(get_tok
     except Exception as e:
         logger.error(f"Error in /notification-settings POST: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
+
 @router.get("/notifications")
 async def get_notifications(data: dict = Depends(get_token)):
     try:
@@ -1479,6 +2059,62 @@ async def read_all_notifications(data: dict = Depends(get_token)):
         logger.error(f"Error in /notifications/read-all POST: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
 
+@router.get("/account-status")
+async def get_account_status(data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404})
+
+        is_blocked = user.get("status") == "Blocked"
+        block_reason = user.get("block_reason", "")
+
+        warnings = []
+        try:
+            raw_warnings = list(notifications_collection.find(
+                {"user_id": user_id, "type": "WARNING", "acknowledged": {"$ne": True}}
+            ).sort({"created_at": -1}))
+            for w in raw_warnings:
+                w["_id"] = str(w["_id"])
+                warnings.append({
+                    "_id": w["_id"],
+                    "message": w.get("body", w.get("message", "")),
+                    "created_at": w.get("created_at", ""),
+                    "acknowledged": w.get("acknowledged", False)
+                })
+        except Exception as warn_err:
+            logger.warning(f"Could not fetch warnings in status: {warn_err}")
+
+        return JSONResponse({
+            "data": {
+                "is_blocked": is_blocked,
+                "block_reason": block_reason,
+                "warnings": warnings
+            },
+            "status": 200
+        })
+    except Exception as e:
+        logger.error(f"Error in /account-status: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/acknowledge-warning")
+async def acknowledge_warning(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data["id"]
+        warning_id = payload.get("warning_id")
+
+        if not warning_id:
+            return JSONResponse({"message": "Warning ID is required", "status": 400})
+
+        notifications_collection.update_one(
+            {"_id": warning_id, "user_id": user_id},
+            {"$set": {"acknowledged": True, "acknowledged_at": datetime.datetime.utcnow().isoformat()}}
+        )
+        return JSONResponse({"message": "Warning acknowledged", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /acknowledge-warning: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
 
 # user Credit wallet endpoint
 @router.post("/credit-wallet")
@@ -1607,7 +2243,15 @@ async def create_jard_kidz_plan(plan_data: JardKidzPlan, background_tasks: Backg
             "created_at": plan["created_at"]
         })
         
-        # 4. Save Plan
+        # 4. Add auto-debit & tracking fields
+        plan["next_payment_date"] = (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+        plan["auto_debit"] = False
+        plan["encrypted_pin"] = ""
+        plan["penalty_amount"] = 0.0
+        plan["reminder_7d_sent"] = False
+        plan["reminder_3d_sent"] = False
+
+        # Save Plan
         jard_kidz_collection.insert_one(plan)
         
         # 5. Send Confirmation Email
@@ -1689,22 +2333,30 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
         if months_to_pay > remaining:
             return JSONResponse(status_code=400, content={"message": f"Cannot overpay. Only {remaining} months left."})
 
-        amount_to_deduct = months_to_pay * plan["monthly_amount"]
+        penalty = float(plan.get("penalty_amount", 0))
+        amount_to_deduct = (months_to_pay * plan["monthly_amount"]) + penalty
 
         # Check wallet
         user = user_collection.find_one({"_id": user_id})
         if not user or user.get("wallet_balance", 0) < amount_to_deduct:
-            return JSONResponse(status_code=400, content={"message": "Insufficient wallet balance."})
+            return JSONResponse(status_code=400, content={"message": f"Insufficient wallet balance. You need ₦{amount_to_deduct:,.2f} (incl. ₦{penalty:,.2f} penalty) but have ₦{float(user.get('wallet_balance', 0)):,.2f}."})
         
-        # Deduct wallet
-        new_balance = float(user["wallet_balance"]) - amount_to_deduct
-        user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
+        # Deduct wallet (atomic)
+        user_collection.update_one(
+            {"_id": user_id, "wallet_balance": {"$gte": amount_to_deduct}},
+            {"$inc": {"wallet_balance": -amount_to_deduct}}
+        )
+        
+        updated_user = user_collection.find_one({"_id": user_id})
+        actual_balance = float(updated_user["wallet_balance"])
 
         # Record Transaction
         transaction = {
             "tx_ref": f"JKDZ-TOPUP-{secrets.token_hex(6).upper()}",
             "user_id": user_id,
-            "amount": amount_to_deduct,
+            "amount": months_to_pay * plan["monthly_amount"],
+            "penalty_part": penalty,
+            "total_amount": amount_to_deduct,
             "gateway": "Wallet",
             "type": "DEBIT",
             "purpose": f"JardKidz Plan Top-Up: {plan['child_name']} ({months_to_pay} months)",
@@ -1713,10 +2365,11 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
         }
         transactions_collection.insert_one(transaction)
 
-        # Increment Plan Months
+        # Increment Plan Months & reset penalty
         jard_kidz_collection.update_one(
             {"_id": plan_id},
-            {"$inc": {"months_paid": months_to_pay}}
+            {"$inc": {"months_paid": months_to_pay},
+             "$set": {"penalty_amount": 0}}
         )
 
         # Send Top-up Email
@@ -1734,10 +2387,53 @@ async def topup_jard_kidz_plan(payload: dict, background_tasks: BackgroundTasks,
             is_setup=False
         )
 
-        return JSONResponse({"message": "Plan top-up successful", "status": 200})
+        return JSONResponse({"message": "Plan top-up successful", "status": 200, "wallet_balance": actual_balance})
 
     except Exception as e:
         logger.error(f"Error in topup_jard_kidz_plan: {e}")
+        return JSONResponse(status_code=500, content={"message": str(e)})
+
+
+@router.post("/toggle-auto-debit-jardkidz/{plan_id}")
+async def toggle_jardkidz_auto_debit(plan_id: str, payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        if not user_id:
+            return JSONResponse(status_code=401, content={"message": "Invalid user"})
+        plan = jard_kidz_collection.find_one({"_id": plan_id})
+        if not plan or plan.get("user_id") != user_id:
+            return JSONResponse(status_code=404, content={"message": "Plan not found"})
+        enable = payload.get("enable", False)
+        pin = payload.get("pin", "")
+        if enable:
+            if not pin or len(str(pin)) != 4:
+                return JSONResponse(status_code=400, content={"message": "Valid 4-digit PIN required"})
+            user = user_collection.find_one({"_id": user_id})
+            if not user or not user.get("transaction_pin"):
+                return JSONResponse(status_code=400, content={"message": "No transaction PIN set"})
+            try:
+                valid = VerifyHashed(user["transaction_pin"], str(pin))
+                if not valid:
+                    return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            except Exception:
+                return JSONResponse(status_code=401, content={"message": "Incorrect PIN"})
+            if not plan.get("next_payment_date"):
+                nxt = (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+                jard_kidz_collection.update_one({"_id": plan_id}, {"$set": {"next_payment_date": nxt}})
+            encrypted = _encrypt_pin(str(pin))
+            jard_kidz_collection.update_one(
+                {"_id": plan_id},
+                {"$set": {"auto_debit": True, "encrypted_pin": encrypted}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-debit enabled for JardKidz plan", "status": 200})
+        else:
+            jard_kidz_collection.update_one(
+                {"_id": plan_id},
+                {"$set": {"auto_debit": False, "encrypted_pin": ""}}
+            )
+            return JSONResponse(status_code=200, content={"message": "Auto-debit disabled", "status": 200})
+    except Exception as e:
+        logger.error(f"Toggle jardkidz auto-debit error: {e}")
         return JSONResponse(status_code=500, content={"message": str(e)})
 
 
