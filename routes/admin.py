@@ -35,9 +35,9 @@ def verify_admin_token(payload: dict = Depends(get_token)):
             )
         
         email = user.get("email", "").lower()
-        admin_email = "jarvadgroup.business@gmail.com".lower()
+        admin_emails = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "jarvadgroup.business@gmail.com").split(",")]
         
-        if email != admin_email:
+        if email not in admin_emails:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access Denied: You do not have administrator privileges"
