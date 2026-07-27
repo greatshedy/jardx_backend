@@ -93,8 +93,6 @@ if "subscription_settings" not in existing_collections:
     try:
         sub_settings_collection = db.create_collection("subscription_settings")
         sub_settings_collection.insert_one({
-            "testing_mode": False,
-            "testing_duration_minutes": 3,
             "vendor_fee": 25000,
             "partner_fee": 100000,
             "sub_duration_months": 1,

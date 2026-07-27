@@ -164,7 +164,7 @@ async def startup_event():
     try:
         from scheduler import run_all
         scheduler = BackgroundScheduler()
-        scheduler.add_job(run_all, 'interval', seconds=60, id='run_all_tasks')
+        scheduler.add_job(run_all, 'interval', seconds=300, id='run_all_tasks')
         scheduler.start()
         logger.info("APScheduler started - running every 60 seconds")
     except Exception as e:

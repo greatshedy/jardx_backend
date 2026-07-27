@@ -44,8 +44,6 @@ def get_settings():
     doc = sub_settings_collection.find_one({})
     if not doc:
         doc = {
-            "testing_mode": False,
-            "testing_duration_minutes": 3,
             "vendor_fee": 25000,
             "partner_fee": 100000,
             "sub_duration_months": 1,
@@ -54,8 +52,6 @@ def get_settings():
     return doc
 
 def _duration_delta(settings, base_months=1):
-    if settings.get("testing_mode"):
-        return datetime.timedelta(minutes=settings.get("testing_duration_minutes", 3))
     return relativedelta(months=base_months)
 
 def _now():
@@ -84,8 +80,6 @@ def _time_remaining(target_iso, settings):
     try:
         target = datetime.datetime.fromisoformat(target_iso)
         diff = target - _now()
-        if settings.get("testing_mode"):
-            return diff.total_seconds() / 60
         return diff.days
     except Exception:
         return None

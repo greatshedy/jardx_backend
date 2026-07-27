@@ -26,7 +26,7 @@ class FlutterwaveGateway(BasePaymentGateway):
             },
             "customizations": {
                 "title": "JardX Wallet Funding",
-                "logo": "https://your-logo-url.com"
+                "logo": "https://res.cloudinary.com/dbuzfzydb/image/upload/v1/logo.png"
             }
         }
 
