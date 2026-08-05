@@ -278,19 +278,23 @@ async def get_payment_history(
             elif db_status in ["FAILED", "DECLINED"]:
                 tx["status"] = "FAILED"
             else:
-                # 🕰️ Auto-fail old pending transactions (1 hour limit)
-                created_at = tx.get("created_at")
-                if created_at:
-                    try:
-                        tx_time = datetime.datetime.fromisoformat(created_at)
-                        if (now - tx_time).total_seconds() > 3600:
-                            tx["status"] = "FAILED"
-                        else:
-                            tx["status"] = "PENDING"
-                    except:
-                        tx["status"] = "PENDING"
-                else:
+                # Withdrawals wait on admin approval — don't auto-fail them
+                if "withdraw" in str(tx.get("purpose", "")).lower():
                     tx["status"] = "PENDING"
+                else:
+                    # 🕰️ Auto-fail old pending transactions (1 hour limit)
+                    created_at = tx.get("created_at")
+                    if created_at:
+                        try:
+                            tx_time = datetime.datetime.fromisoformat(created_at)
+                            if (now - tx_time).total_seconds() > 3600:
+                                tx["status"] = "FAILED"
+                            else:
+                                tx["status"] = "PENDING"
+                        except:
+                            tx["status"] = "PENDING"
+                    else:
+                        tx["status"] = "PENDING"
 
             # Add missing metadata defaults
             if "type" not in tx:

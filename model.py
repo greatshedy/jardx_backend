@@ -41,6 +41,7 @@ class Login(BaseModel):
 class GoogleAuth(BaseModel):
     idToken: str
     platform: str = "web"
+    referred_by: str = ""
 
 
 class House(BaseModel):

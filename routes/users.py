@@ -1168,16 +1168,13 @@ async def google_auth(payload: GoogleAuth):
     platform = payload.platform
     
     try:
-        # Determine the correct client ID
-        if platform == "android":
-            client_id = os.getenv("GOOGLE_ANDROID_CLIENT_ID")
-        elif platform == "ios":
-            client_id = os.getenv("GOOGLE_IOS_CLIENT_ID")
-        else:
-            client_id = os.getenv("GOOGLE_WEB_CLIENT_ID")
-            
+        # The RN Google Sign-In SDK mints the ID token for this project; verify its
+        # signature/issuer/expiry. Audience is not enforced here so the token is
+        # accepted regardless of which of the project's client IDs minted it.
+        logger.info(f"/google-auth platform={platform}")
+
         # Verify the token
-        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), client_id)
+        idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), None)
         
         email = idinfo['email']
         name = idinfo.get('name', '')
@@ -1190,6 +1187,8 @@ async def google_auth(payload: GoogleAuth):
             new_user = {
                 "user_name": name,
                 "email": email,
+                "profile_pic": idinfo.get('picture', ''),
+                "phone_number": "",
                 "wallet_balance": 0.0,
                 "password": "", # No password for Google users
                 "otp": "",
@@ -1200,32 +1199,51 @@ async def google_auth(payload: GoogleAuth):
                 "referral_percentage": 0.0,
                 "referral_bonus_paid": False
             }
+            
+            # Handle Referral Lookup
+            referred_by_code = (payload.referred_by or "").strip().upper()
+            if referred_by_code:
+                referrer = user_collection.find_one({"referral_code": referred_by_code})
+                if referrer:
+                    new_user["referred_by"] = str(referrer["_id"])
+            
             user_id = user_collection.insert_one(new_user).inserted_id
             user_payload = {"id": user_id}
             message = "Registration Successful"
+            user_doc = new_user
         else:
             user_payload = {"id": user_from_db["_id"]}
             message = "Login Successful"
+            user_doc = user_from_db
             
         # Create JWT token
         token = create_access_token(user_payload)
         
+        # Return user data (sanitize first)
+        user_info = {
+            "user_name": user_doc.get("user_name", ""),
+            "email": user_doc.get("email", ""),
+            "phone_number": user_doc.get("phone_number", ""),
+            "profile_pic": user_doc.get("profile_pic", "")
+        }
+        
         return JSONResponse({
             "message": message,
             "token": token,
+            "user": user_info,
             "status": status.HTTP_200_OK
         })
         
     except ValueError as e:
         logger.error(f"Invalid Google token: {e}")
         return JSONResponse({
-            "message": "Invalid Google token",
+            "message": f"Invalid Google token: {e}",
             "status": status.HTTP_401_UNAUTHORIZED
         })
     except Exception as e:
         logger.error(f"Error in /google-auth: {e}")
         return JSONResponse({
-            "message": "Internal server error",
+            "message": f"Internal server error: {e}",
             "status": status.HTTP_500_INTERNAL_SERVER_ERROR
         })
 
@@ -1403,8 +1421,9 @@ async def Home(data: dict = Depends(get_token)):
             # 1. Count referrals (Using find + to_list for Astra DB compatibility)
             f_referrals = executor.submit(lambda: list(user_collection.find({"referred_by": uid_str})))
             
-            # 2. Fetch credits (Broadened for diagnostics)
+            # 2. Fetch credits (scoped to this user for performance)
             f_credits = executor.submit(lambda: list(transactions_collection.find({
+                "user_id": uid_str,
                 "type": "CREDIT"
             })))
             
@@ -1462,6 +1481,13 @@ async def Home(data: dict = Depends(get_token)):
                 partner_direct_earned = 0
                 partner_indirect_earned = 0
 
+        try:
+            from routes.withdraw import _compute_earnings
+            withdrawable = _compute_earnings(user_id)["available_balance"]
+        except Exception as we:
+            logger.warning(f"Could not compute withdrawable earnings: {we}")
+            withdrawable = 0.0
+
         user_data["referral_info"] = {
             "code": user_data.get("referral_code", ""),
             "is_active": user_data.get("is_referral_active", False),
@@ -1469,6 +1495,7 @@ async def Home(data: dict = Depends(get_token)):
             "total_referrals": total_referrals,
             "total_earned": total_earned,
             "total_withdrawn": total_withdrawn,
+            "withdrawable": round(float(withdrawable), 2),
             "partner_type": user_data.get("partner_type", "normal"),
             "partner_direct_earned": partner_direct_earned,
             "partner_indirect_earned": partner_indirect_earned

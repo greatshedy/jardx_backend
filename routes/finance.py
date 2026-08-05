@@ -1,6 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends
 from utill import send_wallet_credit_email
-from db.database import transactions_collection, portfolio_collection, user_collection, jard_kidz_collection, house_collection
+from db.database import transactions_collection, portfolio_collection, user_collection, jard_kidz_collection, house_collection, withdraw_requests_collection
 from fastapi.responses import JSONResponse
 from starlette import status
 from datetime import datetime
@@ -335,3 +335,99 @@ async def get_admin_reports():
     except Exception as e:
         logger.error(f"Error generating reports: {e}")
         return JSONResponse(content={"message": str(e)}, status_code=500)
+
+
+@router.get("/withdraw-requests")
+async def get_withdraw_requests():
+    try:
+        cursor = withdraw_requests_collection.find({}).sort({"created_at": -1})
+        requests = []
+        for doc in cursor:
+            user = user_collection.find_one({"_id": doc.get("user_id")}) or {}
+            bank = doc.get("bank_account") or {}
+            requests.append({
+                "id": doc.get("id"),
+                "user_id": doc.get("user_id"),
+                "user_name": doc.get("user_name") or user.get("user_name", "Unknown"),
+                "user_email": doc.get("user_email") or user.get("email", ""),
+                "amount": round(float(doc.get("amount", 0) or 0), 2),
+                "bank_name": bank.get("bank_name"),
+                "account_number": bank.get("account_number"),
+                "account_name": bank.get("account_name"),
+                "state": doc.get("state"),
+                "created_at": doc.get("created_at"),
+                "verified_at": doc.get("verified_at"),
+            })
+        return JSONResponse({"message": "Withdraw requests fetched", "data": requests, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching withdraw requests: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/withdraw-requests/{withdraw_id}/approve")
+async def approve_withdraw_request(withdraw_id: str):
+    try:
+        record = withdraw_requests_collection.find_one({"id": withdraw_id})
+        if not record:
+            return JSONResponse({"message": "Withdraw request not found", "status": 404})
+
+        state = record.get("state")
+        if state in ("paid", "rejected"):
+            return JSONResponse({"message": f"Withdraw request already {state}", "status": 400})
+
+        now_iso = datetime.utcnow().isoformat()
+        withdraw_requests_collection.update_one(
+            {"id": withdraw_id},
+            {"$set": {"state": "paid", "processed_at": now_iso, "updated_at": now_iso}},
+        )
+        try:
+            transactions_collection.update_one(
+                {"withdraw_id": withdraw_id},
+                {"$set": {"status": "SUCCESSFUL", "completed_at": now_iso}},
+            )
+        except Exception as e:
+            logger.error(f"Error updating withdrawal history on approve: {e}")
+        return JSONResponse({"message": "Withdraw request approved", "status": 200})
+    except Exception as e:
+        logger.error(f"Error approving withdraw request {withdraw_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/withdraw-requests/{withdraw_id}/reject")
+async def reject_withdraw_request(withdraw_id: str):
+    try:
+        record = withdraw_requests_collection.find_one({"id": withdraw_id})
+        if not record:
+            return JSONResponse({"message": "Withdraw request not found", "status": 404})
+
+        state = record.get("state")
+        if state in ("paid", "rejected"):
+            return JSONResponse({"message": f"Withdraw request already {state}", "status": 400})
+
+        amount = float(record.get("amount", 0) or 0)
+        user_id = record.get("user_id")
+        if user_id and amount > 0:
+            user = user_collection.find_one({"_id": user_id})
+            if user:
+                new_balance = round(float(user.get("wallet_balance", 0) or 0) + amount, 2)
+                user_collection.update_one(
+                    {"_id": user_id},
+                    {"$set": {"wallet_balance": new_balance, "updated_at": datetime.utcnow().isoformat()}},
+                )
+
+        now_iso = datetime.utcnow().isoformat()
+        withdraw_requests_collection.update_one(
+            {"id": withdraw_id},
+            {"$set": {"state": "rejected", "processed_at": now_iso, "updated_at": now_iso}},
+        )
+        try:
+            transactions_collection.update_one(
+                {"withdraw_id": withdraw_id},
+                {"$set": {"status": "FAILED", "completed_at": now_iso}},
+            )
+        except Exception as e:
+            logger.error(f"Error updating withdrawal history on reject: {e}")
+        return JSONResponse({"message": "Withdraw request rejected and wallet refunded", "status": 200})
+    except Exception as e:
+        logger.error(f"Error rejecting withdraw request {withdraw_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})

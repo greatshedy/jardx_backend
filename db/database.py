@@ -31,6 +31,21 @@ client = DataAPIClient(
 )
 db = client.get_database_by_api_endpoint(db_url)
 
+# --- Auxiliary database (separate keyspace to stay within the 100-index limit) ---
+db_aux_token = os.getenv("DB_AUX_TOKEN")
+db_aux_url = os.getenv("DB_AUX_URL")
+if not db_aux_token or not db_aux_url:
+    raise RuntimeError("DB_AUX_TOKEN and DB_AUX_URL must be set in .env")
+aux_client = DataAPIClient(
+    db_aux_token,
+    api_options=APIOptions(
+        timeout_options=TimeoutOptions(
+            request_timeout_ms=30000,
+        ),
+    ),
+)
+db_aux = aux_client.get_database_by_api_endpoint(db_aux_url)
+
 # Access collections
 user_collection=db.get_collection("users")
 house_collection=db.get_collection("jard_houses")
@@ -75,23 +90,23 @@ if "reviews" not in existing_collections:
 else:
     reviews_collection = db.get_collection("reviews")
 
-if "reports" not in existing_collections:
+if "reports" not in db_aux.list_collection_names():
     try:
-        reports_collection = db.create_collection("reports")
+        reports_collection = db_aux.create_collection("reports")
     except Exception as e:
         print(f"Error creating reports collection: {e}")
-        reports_collection = db.get_collection("reports")
+        reports_collection = db_aux.get_collection("reports")
 else:
-    reports_collection = db.get_collection("reports")
+    reports_collection = db_aux.get_collection("reports")
 
 if "notifications" not in existing_collections:
     notifications_collection = db.create_collection("notifications")
 else:
     notifications_collection = db.get_collection("notifications")
 
-if "subscription_settings" not in existing_collections:
+if "subscription_settings" not in db_aux.list_collection_names():
     try:
-        sub_settings_collection = db.create_collection("subscription_settings")
+        sub_settings_collection = db_aux.create_collection("subscription_settings")
         sub_settings_collection.insert_one({
             "vendor_fee": 25000,
             "partner_fee": 100000,
@@ -99,17 +114,17 @@ if "subscription_settings" not in existing_collections:
             "penalty_percentage": 5
         })
     except Exception:
-        sub_settings_collection = db.get_collection("subscription_settings")
+        sub_settings_collection = db_aux.get_collection("subscription_settings")
 else:
-    sub_settings_collection = db.get_collection("subscription_settings")
+    sub_settings_collection = db_aux.get_collection("subscription_settings")
 
-if "withdraw_requests" not in existing_collections:
+if "withdraw_requests" not in db_aux.list_collection_names():
     try:
-        withdraw_requests_collection = db.create_collection("withdraw_requests")
+        withdraw_requests_collection = db_aux.create_collection("withdraw_requests")
     except Exception as e:
         print(f"Error creating withdraw_requests collection: {e}")
-        withdraw_requests_collection = db.get_collection("withdraw_requests")
+        withdraw_requests_collection = db_aux.get_collection("withdraw_requests")
 else:
-    withdraw_requests_collection = db.get_collection("withdraw_requests")
+    withdraw_requests_collection = db_aux.get_collection("withdraw_requests")
 
 print("Astra DB connection initialized successfully.")

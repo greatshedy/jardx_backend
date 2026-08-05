@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from db.database import (
     user_collection,
+    transactions_collection,
     withdraw_requests_collection,
 )
 from utill import get_token, VerifyHashed, generate_otp
@@ -40,6 +41,64 @@ def _bank_summary(bank: dict) -> str:
     return f"{name} (...{last4})" if last4 else name
 
 
+def _is_earnings_purpose(purpose: str) -> bool:
+    p = (purpose or "").lower()
+    return (
+        "referral bonus" in p
+        or "partner direct commission" in p
+        or "partner indirect commission" in p
+    )
+
+
+def _compute_earnings(user_id) -> dict:
+    """Total earned in the app (referral/partner credits), minus what has been
+    withdrawn or is pending. Top-ups are NOT part of earnings."""
+    uid_str = str(user_id)
+
+    total_earned = 0.0
+    try:
+        cursor = transactions_collection.find({
+            "user_id": uid_str,
+            "type": "CREDIT",
+        })
+        for doc in cursor:
+            if _is_earnings_purpose(doc.get("purpose", "")):
+                total_earned += float(doc.get("amount", 0) or 0)
+    except Exception as e:
+        logger.error(f"Error summing earnings credits: {e}")
+
+    total_withdrawn = 0.0
+    try:
+        cursor = withdraw_requests_collection.find({
+            "user_id": user_id,
+            "state": {"$in": ["pending_admin", "paid"]},
+        })
+        for doc in cursor:
+            total_withdrawn += float(doc.get("amount", 0) or 0)
+    except Exception as e:
+        logger.error(f"Error summing withdraws: {e}")
+
+    pending_amount = 0.0
+    try:
+        cursor = withdraw_requests_collection.find({
+            "user_id": user_id,
+            "state": {"$in": ["pending_otp"]},
+        })
+        for doc in cursor:
+            pending_amount += float(doc.get("amount", 0) or 0)
+    except Exception as e:
+        logger.error(f"Error summing pending withdraws: {e}")
+
+    available = max(0.0, total_earned - total_withdrawn - pending_amount)
+
+    return {
+        "total_earned": round(total_earned, 2),
+        "total_withdrawn": round(total_withdrawn, 2),
+        "pending_amount": round(pending_amount, 2),
+        "available_balance": round(available, 2),
+    }
+
+
 class WithdrawRequestPayload(BaseModel):
     amount: float
     bank_account_id: str
@@ -63,41 +122,12 @@ async def get_earnings(data: dict = Depends(get_token)):
         if not user:
             return JSONResponse({"message": "User not found", "status": 404})
 
-        earnings_balance = user.get("earnings_balance")
-        if earnings_balance is None:
-            earnings_balance = float(user.get("wallet_balance", 0) or 0)
-
-        total_withdrawn = 0.0
-        try:
-            cursor = withdraw_requests_collection.find({
-                "user_id": user_id,
-                "state": {"$in": ["pending_admin", "paid"]},
-            })
-            for doc in cursor:
-                total_withdrawn += float(doc.get("amount", 0) or 0)
-        except Exception as e:
-            logger.error(f"Error summing withdraws: {e}")
-
-        pending_amount = 0.0
-        try:
-            cursor = withdraw_requests_collection.find({
-                "user_id": user_id,
-                "state": {"$in": ["pending_otp"]},
-            })
-            for doc in cursor:
-                pending_amount += float(doc.get("amount", 0) or 0)
-        except Exception as e:
-            logger.error(f"Error summing pending withdraws: {e}")
-
-        available = max(0.0, float(earnings_balance) - pending_amount)
+        earnings = _compute_earnings(user_id)
 
         return {
             "status": 200,
             "data": {
-                "available_balance": round(available, 2),
-                "total_earned": round(float(earnings_balance), 2),
-                "total_withdrawn": round(total_withdrawn, 2),
-                "pending_amount": round(pending_amount, 2),
+                **earnings,
                 "minimum_amount": WITHDRAW_MIN_AMOUNT,
             },
         }
@@ -156,13 +186,13 @@ async def withdraw_request(
                 {"message": "Incorrect transaction PIN.", "status": 401}
             )
 
-        earnings_balance = user.get("earnings_balance")
-        if earnings_balance is None:
-            earnings_balance = float(user.get("wallet_balance", 0) or 0)
-        if float(earnings_balance) < amount:
+        earnings = _compute_earnings(user_id)
+        available = earnings["available_balance"]
+        wallet_balance = float(user.get("wallet_balance", 0) or 0)
+        if available < amount or wallet_balance < amount:
             return JSONResponse(
                 {
-                    "message": f"Insufficient earnings balance. Available: \u20a6{float(earnings_balance):,.2f}.",
+                    "message": f"Insufficient earnings balance. Available: \u20a6{available:,.2f}.",
                     "status": 400,
                 }
             )
@@ -287,11 +317,9 @@ async def withdraw_verify_otp(
         if not user:
             return JSONResponse({"message": "User not found", "status": 404})
 
-        earnings_balance = user.get("earnings_balance")
-        if earnings_balance is None:
-            earnings_balance = float(user.get("wallet_balance", 0) or 0)
         amount = float(record.get("amount", 0))
-        if float(earnings_balance) < amount:
+        earnings = _compute_earnings(user_id)
+        if earnings["available_balance"] < amount:
             return JSONResponse(
                 {
                     "message": "Insufficient earnings balance. Withdraw request cancelled.",
@@ -299,7 +327,7 @@ async def withdraw_verify_otp(
                 }
             )
 
-        new_earnings = round(float(earnings_balance) - amount, 2)
+        new_earnings = round(max(0.0, earnings["available_balance"] - amount), 2)
         new_wallet = round(float(user.get("wallet_balance", 0) or 0) - amount, 2)
         user_collection.update_one(
             {"_id": user_id},
@@ -324,6 +352,22 @@ async def withdraw_verify_otp(
                 }
             },
         )
+
+        # Record the withdrawal in the user's transaction history
+        try:
+            transactions_collection.insert_one({
+                "tx_ref": f"WD-{secrets.token_hex(4).upper()}",
+                "user_id": str(user_id),
+                "withdraw_id": withdraw_id,
+                "amount": round(amount, 2),
+                "gateway": "Bank Transfer",
+                "type": "DEBIT",
+                "purpose": "Withdrawal",
+                "status": "PENDING",
+                "created_at": now_iso,
+            })
+        except Exception as tx_err:
+            logger.error(f"Error recording withdrawal transaction: {tx_err}")
 
         return JSONResponse(
             {
@@ -420,7 +464,7 @@ async def withdraw_history(data: dict = Depends(get_token)):
     try:
         user_id = data.get("id")
         try:
-            cursor = withdraw_requests_collection.find({"user_id": user_id}).sort("created_at", -1)
+            cursor = withdraw_requests_collection.find({"user_id": user_id}).sort({"created_at": -1})
             records = []
             for doc in cursor:
                 records.append({
