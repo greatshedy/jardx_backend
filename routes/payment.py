@@ -19,12 +19,24 @@ async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
         raise HTTPException(status_code=401, detail="Invalid user")
 
     deposit_amount = payload.get("amount")
-    total_amount = payload.get("total_amount", deposit_amount)
     gateway_name = payload.get("gateway") # "Monnify" or "Flutterwave"
     redirect_url = payload.get("redirect_url")
 
     if not deposit_amount or not gateway_name:
         raise HTTPException(status_code=400, detail="Amount and gateway are required")
+
+    # Server-side processing fee (single source of truth).
+    # Monnify is capped at ₦2,000; Flutterwave stays at 2.5% with no cap.
+    try:
+        deposit_amount = float(deposit_amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Amount must be a number")
+
+    if str(gateway_name).lower() == "monnify":
+        fee = min(deposit_amount * 0.015, 2000.0)
+    else:
+        fee = deposit_amount * 0.025
+    total_amount = round(deposit_amount + fee, 2)
 
     # Fetch user details for the gateway
     user = user_collection.find_one({"_id": user_id})
