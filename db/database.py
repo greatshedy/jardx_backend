@@ -110,7 +110,7 @@ if "subscription_settings" not in db_aux.list_collection_names():
         sub_settings_collection.insert_one({
             "vendor_fee": 25000,
             "partner_fee": 100000,
-            "sub_duration_months": 1,
+            "sub_duration_months": 12,
             "penalty_percentage": 5
         })
     except Exception:

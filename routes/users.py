@@ -39,7 +39,7 @@ async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
         photo_url = upload_to_cloudinary(vendor.photo, f"vendors/photos/{user_id}")
         cert_url = upload_to_cloudinary(vendor.certificate, f"vendors/certs/{user_id}")
             
-        expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+        expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
 
         vendor_record = vendor.dict()
         vendor_record["user_id"] = user_id
@@ -109,9 +109,11 @@ async def get_vendor_subscription(data: dict = Depends(get_token)):
         
         subscription_expiry = vendor_data.get("subscription_expiry")
         subscription_status = vendor_data.get("subscription_status", "active")
-        
+
+        settings = get_settings()
+
         if not subscription_expiry:
-            subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+            subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
             subscription_status = "active"
             vendors_collection.update_one(
                 {"user_id": user_id},
@@ -166,7 +168,7 @@ async def renew_vendor_subscription(data: dict = Depends(get_token)):
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
         
-        new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+        new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
         
         vendors_collection.update_one(
             {"user_id": user_id},
@@ -565,7 +567,7 @@ async def partner_register(partner: JardAccount, data: dict = Depends(get_token)
         photo_url = upload_to_cloudinary(partner.photo, f"partners/photos/{user_id}")
         cert_url = upload_to_cloudinary(partner.certificate, f"partners/certs/{user_id}")
             
-        expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+        expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
 
         partner_record = partner.dict()
         partner_record["user_id"] = user_id
@@ -837,9 +839,11 @@ async def get_partner_subscription(data: dict = Depends(get_token)):
         
         subscription_expiry = partner_data.get("subscription_expiry")
         subscription_status = partner_data.get("subscription_status", "active")
-        
+
+        settings = get_settings()
+
         if not subscription_expiry:
-            subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=1)).isoformat()
+            subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
             subscription_status = "active"
             partners_collection.update_one(
                 {"user_id": user_id},
@@ -894,7 +898,7 @@ async def renew_partner_subscription(data: dict = Depends(get_token)):
         if user_data.get("wallet_balance", 0) < fee:
             return JSONResponse({"message": "Insufficient balance", "status": 400})
         
-        new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 1)))).isoformat()
+        new_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
         
         partners_collection.update_one(
             {"user_id": user_id},

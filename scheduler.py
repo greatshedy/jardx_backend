@@ -46,13 +46,14 @@ def get_settings():
         doc = {
             "vendor_fee": 25000,
             "partner_fee": 100000,
-            "sub_duration_months": 1,
+            "sub_duration_months": 12,
             "penalty_percentage": 5
         }
     return doc
 
-def _duration_delta(settings, base_months=1):
-    return relativedelta(months=base_months)
+def _duration_delta(settings, base_months=None):
+    months = int(base_months or settings.get("sub_duration_months", 12))
+    return relativedelta(months=months)
 
 def _now():
     return datetime.datetime.utcnow()
