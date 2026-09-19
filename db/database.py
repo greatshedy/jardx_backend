@@ -127,4 +127,13 @@ if "withdraw_requests" not in db_aux.list_collection_names():
 else:
     withdraw_requests_collection = db_aux.get_collection("withdraw_requests")
 
+if "deletion_requests" not in db_aux.list_collection_names():
+    try:
+        deletion_requests_collection = db_aux.create_collection("deletion_requests")
+    except Exception as e:
+        print(f"Error creating deletion_requests collection: {e}")
+        deletion_requests_collection = db_aux.get_collection("deletion_requests")
+else:
+    deletion_requests_collection = db_aux.get_collection("deletion_requests")
+
 print("Astra DB connection initialized successfully.")

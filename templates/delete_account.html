@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Request Account Deletion - JardX</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #FF6900;
+            --primary-dark: #E65F00;
+            --danger: #EF4444;
+            --danger-dark: #DC2626;
+            --bg: #0F172A;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --text: #F8FAFC;
+            --text-muted: #94A3B8;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0F172A 0%, #1E293B 100%);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 460px;
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: fadeIn 0.6s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .header { text-align: center; margin-bottom: 28px; }
+
+        .logo { width: 72px; height: auto; margin-bottom: 16px; }
+
+        h1 {
+            font-size: 23px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            background: linear-gradient(to right, #FFF, #FF6900);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p.subtitle { color: var(--text-muted); font-size: 14px; line-height: 1.5; }
+
+        .form-group { margin-bottom: 20px; }
+
+        label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--text-muted);
+        }
+
+        input, textarea {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 12px 16px;
+            color: white;
+            font-size: 16px;
+            font-family: inherit;
+            transition: all 0.3s ease;
+        }
+
+        textarea { resize: vertical; min-height: 96px; font-size: 14px; }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            background: rgba(255, 255, 255, 0.08);
+            box-shadow: 0 0 0 4px rgba(255, 105, 0, 0.1);
+        }
+
+        .btn {
+            width: 100%;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 8px;
+        }
+
+        .btn:hover { background: var(--primary-dark); transform: translateY(-2px); }
+        .btn:active { transform: translateY(0); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-danger { background: var(--danger); }
+        .btn-danger:hover { background: var(--danger-dark); }
+
+        .btn-ghost {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: var(--text-muted);
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .btn-ghost:hover { background: rgba(255, 255, 255, 0.05); transform: none; }
+
+        .warning-box {
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            border-radius: 12px;
+            padding: 14px 16px;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #FCA5A5;
+            margin-bottom: 24px;
+        }
+
+        #error-message {
+            color: #FCA5A5;
+            background: rgba(239, 68, 68, 0.1);
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 20px;
+            display: none;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .info-note {
+            display: none;
+            color: #FCD34D;
+            background: rgba(252, 211, 77, 0.08);
+            border: 1px solid rgba(252, 211, 77, 0.2);
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        .footer-text {
+            text-align: center;
+            margin-top: 22px;
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .link-btn {
+            background: none;
+            border: none;
+            color: var(--primary);
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            padding: 0;
+            font-family: inherit;
+        }
+
+        .link-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        #otp-view, #success-view { display: none; }
+
+        .success-icon {
+            width: 64px;
+            height: 64px;
+            background: rgba(34, 197, 94, 0.1);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 24px;
+            color: #22c55e;
+            font-size: 32px;
+        }
+
+        .loading-spinner {
+            display: none;
+            width: 18px;
+            height: 18px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Step 1: Email -->
+        <div id="email-view">
+            <div class="header">
+                <img src="/static/logo.png" alt="JardX Logo" class="logo">
+                <h1>Delete Your Account</h1>
+                <p class="subtitle">Submit a request and our team will review it.</p>
+            </div>
+
+            <div class="warning-box">
+                Deleting your account is permanent. Once approved, your profile and data
+                cannot be recovered. Please make sure any active investments or wallet
+                balances are settled first.
+            </div>
+
+            <div id="error-message"></div>
+
+            <form id="email-form">
+                <div class="form-group">
+                    <label>Email Address</label>
+                    <input type="email" name="email" placeholder="john@example.com" required>
+                </div>
+                <button type="submit" class="btn btn-danger" id="email-submit">
+                    <span class="loading-spinner" id="email-spinner"></span>
+                    Send Verification Code
+                </button>
+            </form>
+        </div>
+
+        <!-- Step 2: OTP + reason -->
+        <div id="otp-view">
+            <div class="header">
+                <h1>Verify It's You</h1>
+                <p class="subtitle">
+                    Enter the 6-digit code sent to
+                    <strong id="sent-to" style="color: var(--primary);"></strong>
+                </p>
+            </div>
+
+            <div id="otp-error" class="info-note"></div>
+
+            <form id="otp-form">
+                <div class="form-group">
+                    <label>Verification Code</label>
+                    <input type="text" name="otp" placeholder="123456" inputmode="numeric"
+                           autocomplete="one-time-code" maxlength="6" required>
+                </div>
+                <div class="form-group">
+                    <label>Reason for leaving (optional)</label>
+                    <textarea name="reason" placeholder="Tell us why you're deleting your account..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-danger" id="otp-submit">
+                    <span class="loading-spinner" id="otp-spinner"></span>
+                    Submit Deletion Request
+                </button>
+            </form>
+
+            <div class="footer-text" style="margin-top: 18px;">
+                Didn't get a code?
+                <button type="button" class="link-btn" id="resend-btn">Resend code</button>
+                <br>
+                <button type="button" class="link-btn" id="back-btn" style="margin-top: 10px; color: var(--text-muted);">Use a different email</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Success -->
+        <div id="success-view">
+            <div class="success-icon">✓</div>
+            <h1>Request Submitted</h1>
+            <p class="subtitle" style="margin-top: 10px;">
+                Your account deletion request has been sent to the JardX team.
+                We will review it and notify you by email once it is processed.
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const emailView = document.getElementById('email-view');
+        const otpView = document.getElementById('otp-view');
+        const successView = document.getElementById('success-view');
+
+        const emailForm = document.getElementById('email-form');
+        const otpForm = document.getElementById('otp-form');
+        const emailSubmit = document.getElementById('email-submit');
+        const otpSubmit = document.getElementById('otp-submit');
+        const emailSpinner = document.getElementById('email-spinner');
+        const otpSpinner = document.getElementById('otp-spinner');
+        const errorMsg = document.getElementById('error-message');
+        const otpError = document.getElementById('otp-error');
+        const sentTo = document.getElementById('sent-to');
+        const resendBtn = document.getElementById('resend-btn');
+        const backBtn = document.getElementById('back-btn');
+
+        let requestId = '';
+        let currentEmail = '';
+
+        function showError(el, message) {
+            el.textContent = message;
+            el.style.display = 'block';
+        }
+
+        function hideError(el) {
+            el.style.display = 'none';
+        }
+
+        emailForm.onsubmit = async (e) => {
+            e.preventDefault();
+            emailSubmit.disabled = true;
+            emailSpinner.style.display = 'inline-block';
+            hideError(errorMsg);
+
+            const data = Object.fromEntries(new FormData(emailForm).entries());
+            currentEmail = data.email;
+
+            try {
+                const response = await fetch('/users/delete-account', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: data.email })
+                });
+                const result = await response.json().catch(() => ({}));
+
+                if (!response.ok || result.status !== 200) {
+                    throw new Error(result.message || 'Something went wrong. Please try again.');
+                }
+
+                requestId = result.request_id || '';
+                sentTo.textContent = result.otp_sent_to || data.email;
+                emailView.style.display = 'none';
+                otpView.style.display = 'block';
+
+                if (result.retry_in_seconds) {
+                    showError(otpError, 'A code was just sent. Please wait ' + result.retry_in_seconds + 's before requesting another.');
+                }
+            } catch (err) {
+                showError(errorMsg, err.message);
+            } finally {
+                emailSubmit.disabled = false;
+                emailSpinner.style.display = 'none';
+            }
+        };
+
+        otpForm.onsubmit = async (e) => {
+            e.preventDefault();
+            otpSubmit.disabled = true;
+            otpSpinner.style.display = 'inline-block';
+            hideError(otpError);
+
+            const data = Object.fromEntries(new FormData(otpForm).entries());
+
+            try {
+                const response = await fetch('/users/delete-account/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        request_id: requestId,
+                        otp: data.otp,
+                        reason: data.reason || ''
+                    })
+                });
+                const result = await response.json().catch(() => ({}));
+
+                if (!response.ok || result.status !== 200) {
+                    throw new Error(result.message || 'Verification failed. Please try again.');
+                }
+
+                otpView.style.display = 'none';
+                successView.style.display = 'block';
+            } catch (err) {
+                showError(otpError, err.message);
+            } finally {
+                otpSubmit.disabled = false;
+                otpSpinner.style.display = 'none';
+            }
+        };
+
+        resendBtn.onclick = async () => {
+            if (!requestId) return;
+            hideError(otpError);
+            resendBtn.disabled = true;
+            resendBtn.textContent = 'Sending...';
+
+            try {
+                const response = await fetch('/users/delete-account/resend-otp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ request_id: requestId })
+                });
+                const result = await response.json().catch(() => ({}));
+
+                if (!response.ok || result.status !== 200) {
+                    throw new Error(result.message || 'Could not resend the code.');
+                }
+                showError(otpError, 'A new code has been sent to your email.');
+            } catch (err) {
+                showError(otpError, err.message);
+            } finally {
+                resendBtn.disabled = false;
+                resendBtn.textContent = 'Resend code';
+            }
+        };
+
+        backBtn.onclick = () => {
+            otpView.style.display = 'none';
+            emailView.style.display = 'block';
+            otpForm.reset();
+            hideError(otpError);
+        };
+    </script>
+</body>
+</html>

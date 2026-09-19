@@ -102,6 +102,11 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 templates = Jinja2Templates(directory=os.path.join(current_dir, "templates"))
 app.state.templates = templates
 
+# Public account deletion webpage (short URL for Play Store listing)
+@app.get("/delete-account", include_in_schema=False)
+async def delete_account_webpage(request: Request):
+    return templates.TemplateResponse("delete_account.html", {"request": request})
+
 # --- Resilient CORS Configuration ---
 allowed_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 if allowed_origins_raw == "*":

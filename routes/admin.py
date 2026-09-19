@@ -10,7 +10,7 @@ import os
 import secrets
 import json
 import datetime
-from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection
+from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection
 
 logger = logging.getLogger("jardx")
 
@@ -493,6 +493,81 @@ async def delete_user(user_id: str):
         return JSONResponse({"message": "User deleted successfully", "status": 200})
     except Exception as e:
         logger.error(f"Error deleting user {user_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+# --- ACCOUNT DELETION REQUESTS ---
+
+@router.get("/deletion-requests")
+async def get_deletion_requests():
+    try:
+        docs = list(deletion_requests_collection.find({}).sort({"created_at": -1}))
+        data = []
+        for d in docs:
+            d["_id"] = str(d["_id"])
+            d.pop("otp_plain", None)
+            data.append(d)
+        return JSONResponse({"message": "Deletion requests fetched", "data": data, "status": 200})
+    except Exception as e:
+        logger.error(f"Error fetching deletion requests: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/deletion-requests/{request_id}/approve")
+async def approve_deletion_request(request_id: str):
+    try:
+        record = deletion_requests_collection.find_one({"id": request_id})
+        if not record:
+            return JSONResponse({"message": "Deletion request not found", "status": 404})
+
+        if record.get("state") in ("approved", "rejected"):
+            return JSONResponse({"message": f"Request already {record.get('state')}", "status": 400})
+
+        user_id = str(record.get("user_id") or "")
+        deleted = False
+        if user_id:
+            result = user_collection.delete_one({"_id": user_id})
+            deleted = result.deleted_count > 0
+
+        now_iso = datetime.datetime.utcnow().isoformat()
+        deletion_requests_collection.update_one(
+            {"id": request_id},
+            {"$set": {
+                "state": "approved",
+                "processed_at": now_iso,
+                "updated_at": now_iso,
+                "user_deleted": deleted,
+            }},
+        )
+        logger.info(f"Admin APPROVED deletion request {request_id} | user {user_id} deleted={deleted}")
+        return JSONResponse({"message": "Account deleted and request approved", "status": 200, "user_deleted": deleted})
+    except Exception as e:
+        logger.error(f"Error approving deletion request {request_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+@router.post("/deletion-requests/{request_id}/reject")
+async def reject_deletion_request(request_id: str, data: dict = None):
+    try:
+        record = deletion_requests_collection.find_one({"id": request_id})
+        if not record:
+            return JSONResponse({"message": "Deletion request not found", "status": 404})
+
+        if record.get("state") in ("approved", "rejected"):
+            return JSONResponse({"message": f"Request already {record.get('state')}", "status": 400})
+
+        now_iso = datetime.datetime.utcnow().isoformat()
+        note = (data or {}).get("note", "")
+        deletion_requests_collection.update_one(
+            {"id": request_id},
+            {"$set": {
+                "state": "rejected",
+                "admin_note": note,
+                "processed_at": now_iso,
+                "updated_at": now_iso,
+            }},
+        )
+        logger.info(f"Admin REJECTED deletion request {request_id}")
+        return JSONResponse({"message": "Deletion request rejected", "status": 200})
+    except Exception as e:
+        logger.error(f"Error rejecting deletion request {request_id}: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
 # --- TRANSACTION MANAGEMENT ENDPOINTS ---

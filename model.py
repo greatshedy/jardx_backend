@@ -154,3 +154,14 @@ class Review(BaseModel):
     comment: str
     created_at: str = ""
 
+class DeleteAccountRequest(BaseModel):
+    email: EmailStr
+
+class DeleteAccountVerify(BaseModel):
+    request_id: str
+    otp: str | int
+    reason: str = ""
+
+class DeleteAccountResend(BaseModel):
+    request_id: str
+

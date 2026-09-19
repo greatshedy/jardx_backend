@@ -1,8 +1,8 @@
 from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Request, UploadFile, File
-from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection, notifications_collection, sub_settings_collection, reports_collection, reviews_collection, withdraw_requests_collection
+from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection, notifications_collection, sub_settings_collection, reports_collection, reviews_collection, withdraw_requests_collection, deletion_requests_collection
 import datetime
 import secrets
-from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary
+from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary, send_account_deletion_request_email
 
 from fastapi.responses import JSONResponse, Response
 from utill import generate_otp,get_token,send_email
@@ -14,7 +14,7 @@ import logging
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import os
-from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, JardAccount
+from model import User, Login, GoogleAuth, JardKidzPlan, ForgotPassword, ResetPassword, JardAccount, DeleteAccountRequest, DeleteAccountVerify, DeleteAccountResend
 import shutil
 import time
 
@@ -1829,56 +1829,252 @@ async def check_user_exists(data: dict):
         })
     return JSONResponse({"exists": False, "status": 200})
 
-# user delete account
-@router.post("/delete-account")
-async def delete_account(data: dict = Depends(get_token)):
-    logger.info(f"Delete account request for user: {data.get('id') if data else 'unknown'}")
+# ─────────────────────────────────────────────
+# ACCOUNT DELETION REQUEST FLOW (public, OTP verified)
+# ─────────────────────────────────────────────
+DELETION_OTP_RESEND_COOLDOWN_SECONDS = 60
+DELETION_OTP_EXPIRY_MINUTES = 10
+DELETION_OTP_MAX_ATTEMPTS = 5
+
+
+def _mask_deletion_email(email: str) -> str:
+    if not email or "@" not in email:
+        return "***"
+    name, domain = email.split("@", 1)
+    if len(name) <= 2:
+        return f"{name[0]}***@{domain}"
+    return f"{name[:2]}***{name[-1:]}@{domain}"
+
+
+def _admin_emails_list():
+    raw = os.getenv("ADMIN_EMAILS", "jarvadgroup.business@gmail.com")
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def _notify_admins_of_deletion(record: dict, background_tasks: BackgroundTasks):
+    """Best-effort: store in-app notifications for admins and email them."""
+    admin_emails = _admin_emails_list()
     try:
-        if not data:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"message": "Invalid token"},
-            )
+        admin_ids = []
+        for email in admin_emails:
+            admin = user_collection.find_one({"email": email}, projection={"_id": 1})
+            if admin:
+                admin_ids.append(str(admin["_id"]))
 
-        # get user id from token
-        user_id = data.get("id")
+        if admin_ids:
+            now_iso = datetime.datetime.utcnow().isoformat()
+            notifications_collection.insert_many([
+                {
+                    "user_id": admin_id,
+                    "title": "Account Deletion Request",
+                    "body": f"{record.get('user_name') or 'A user'} ({record.get('user_email')}) requested account deletion.",
+                    "type": "DELETION_REQUEST",
+                    "action_text": "Review",
+                    "is_read": False,
+                    "created_at": now_iso,
+                }
+                for admin_id in admin_ids
+            ])
+    except Exception as notify_err:
+        logger.error(f"Failed to create admin deletion notifications: {notify_err}")
 
-        if not user_id:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"message": "Invalid token payload"},
-            )
-
-        # delete user
-        result = user_collection.delete_one({"_id": str(user_id)})
-        
-        if result.deleted_count == 0:
-            logger.warning(f"Delete failed: User {user_id} not found in database.")
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "User not found"},
-            )
-
-        logger.info(f"User {user_id} deleted successfully")
-
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "message": "user deleted",
-                "status": 200
-            },
+    try:
+        background_tasks.add_task(
+            send_account_deletion_request_email,
+            admin_emails,
+            record.get("user_name", ""),
+            record.get("user_email", ""),
+            record.get("reason", ""),
+            record.get("id", ""),
         )
+    except Exception as email_err:
+        logger.error(f"Failed to queue admin deletion email: {email_err}")
 
 
+@router.get("/delete-account")
+async def delete_account_page(request: Request):
+    return request.app.state.templates.TemplateResponse("delete_account.html", {"request": request})
+
+
+@router.post("/delete-account")
+async def request_delete_account_otp(payload: DeleteAccountRequest, background_tasks: BackgroundTasks):
+    try:
+        email = (payload.email or "").strip().lower()
+
+        # Enumeration-safe: same message and shape whether or not the account exists.
+        response_body = {
+            "status": 200,
+            "message": "If this email is registered with JardX, a verification code has been sent.",
+            "otp_sent_to": _mask_deletion_email(email),
+        }
+
+        user = user_collection.find_one({"email": email})
+        if not user:
+            response_body["request_id"] = f"DEL-{secrets.token_hex(6).upper()}"
+            return JSONResponse(response_body)
+
+        user_id = str(user["_id"])
+        now = datetime.datetime.utcnow()
+        now_iso = now.isoformat()
+        expiry = now + datetime.timedelta(minutes=DELETION_OTP_EXPIRY_MINUTES)
+
+        existing = deletion_requests_collection.find_one({"user_id": user_id, "state": "pending_otp"})
+        otp = generate_otp(length=6)
+
+        if existing:
+            last_sent = existing.get("otp_last_sent_at")
+            try:
+                last_sent_dt = datetime.datetime.fromisoformat(last_sent) if last_sent else None
+            except Exception:
+                last_sent_dt = None
+            if last_sent_dt and (now - last_sent_dt).total_seconds() < DELETION_OTP_RESEND_COOLDOWN_SECONDS:
+                response_body["request_id"] = existing.get("id")
+                response_body["retry_in_seconds"] = int(
+                    DELETION_OTP_RESEND_COOLDOWN_SECONDS - (now - last_sent_dt).total_seconds()
+                )
+                return JSONResponse(response_body)
+
+            request_id = existing.get("id")
+            deletion_requests_collection.update_one(
+                {"id": request_id},
+                {"$set": {
+                    "user_name": user.get("user_name", ""),
+                    "user_email": user.get("email", email),
+                    "otp_plain": otp,
+                    "otp_attempts": 0,
+                    "otp_expires_at": expiry.isoformat(),
+                    "otp_last_sent_at": now_iso,
+                    "updated_at": now_iso,
+                }},
+            )
+        else:
+            request_id = f"DEL-{secrets.token_hex(6).upper()}"
+            deletion_requests_collection.insert_one({
+                "id": request_id,
+                "user_id": user_id,
+                "user_name": user.get("user_name", ""),
+                "user_email": user.get("email", email),
+                "reason": "",
+                "state": "pending_otp",
+                "otp_plain": otp,
+                "otp_attempts": 0,
+                "otp_expires_at": expiry.isoformat(),
+                "otp_last_sent_at": now_iso,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            })
+
+        background_tasks.add_task(send_email, email, otp)
+        response_body["request_id"] = request_id
+        return JSONResponse(response_body)
     except Exception as e:
         logger.error(f"Error in /delete-account: {e}")
+        return JSONResponse(status_code=500, content={"message": "Server error", "status": 500})
 
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "message": f"Server error: {str(e)}",
-            },
+
+@router.post("/delete-account/verify")
+async def verify_delete_account_otp(payload: DeleteAccountVerify, background_tasks: BackgroundTasks):
+    try:
+        request_id = (payload.request_id or "").strip()
+        otp = str(payload.otp or "").strip()
+
+        record = deletion_requests_collection.find_one({"id": request_id})
+        if not record or record.get("state") != "pending_otp":
+            return JSONResponse({"message": "Invalid or expired code. Please request a new one.", "status": 401})
+
+        expires_at = record.get("otp_expires_at")
+        try:
+            expiry_dt = datetime.datetime.fromisoformat(expires_at) if expires_at else None
+        except Exception:
+            expiry_dt = None
+        if expiry_dt and datetime.datetime.utcnow() > expiry_dt:
+            return JSONResponse({"message": "Code expired. Please request a new one.", "status": 410})
+
+        attempts = int(record.get("otp_attempts", 0) or 0)
+        if attempts >= DELETION_OTP_MAX_ATTEMPTS:
+            return JSONResponse({"message": "Too many attempts. Please request a new code.", "status": 429})
+
+        if str(record.get("otp_plain")) != otp:
+            deletion_requests_collection.update_one(
+                {"id": request_id},
+                {"$inc": {"otp_attempts": 1}, "$set": {"updated_at": datetime.datetime.utcnow().isoformat()}},
+            )
+            return JSONResponse({"message": "Invalid code. Please try again.", "status": 401})
+
+        now_iso = datetime.datetime.utcnow().isoformat()
+        reason = (payload.reason or "").strip()[:1000]
+        deletion_requests_collection.update_one(
+            {"id": request_id},
+            {"$set": {
+                "state": "pending",
+                "reason": reason,
+                "otp_plain": None,
+                "verified_at": now_iso,
+                "updated_at": now_iso,
+            }},
         )
+
+        record["reason"] = reason
+        _notify_admins_of_deletion(record, background_tasks)
+
+        return JSONResponse({
+            "status": 200,
+            "message": "Your deletion request has been submitted. Our team will review it shortly.",
+            "request_id": request_id,
+        })
+    except Exception as e:
+        logger.error(f"Error in /delete-account/verify: {e}")
+        return JSONResponse(status_code=500, content={"message": "Server error", "status": 500})
+
+
+@router.post("/delete-account/resend-otp")
+async def resend_delete_account_otp(payload: DeleteAccountResend, background_tasks: BackgroundTasks):
+    try:
+        request_id = (payload.request_id or "").strip()
+        record = deletion_requests_collection.find_one({"id": request_id})
+        if not record or record.get("state") != "pending_otp":
+            return JSONResponse({"message": "No pending request found. Please start again.", "status": 404})
+
+        now = datetime.datetime.utcnow()
+        last_sent = record.get("otp_last_sent_at")
+        try:
+            last_sent_dt = datetime.datetime.fromisoformat(last_sent) if last_sent else None
+        except Exception:
+            last_sent_dt = None
+        if last_sent_dt:
+            elapsed = (now - last_sent_dt).total_seconds()
+            if elapsed < DELETION_OTP_RESEND_COOLDOWN_SECONDS:
+                wait = int(DELETION_OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+                return JSONResponse({"message": f"Please wait {wait}s before resending.", "status": 429, "retry_in_seconds": wait})
+
+        otp = generate_otp(length=6)
+        now_iso = now.isoformat()
+        expiry = now + datetime.timedelta(minutes=DELETION_OTP_EXPIRY_MINUTES)
+        deletion_requests_collection.update_one(
+            {"id": request_id},
+            {"$set": {
+                "otp_plain": otp,
+                "otp_attempts": 0,
+                "otp_expires_at": expiry.isoformat(),
+                "otp_last_sent_at": now_iso,
+                "updated_at": now_iso,
+            }},
+        )
+
+        user_email = record.get("user_email")
+        if user_email:
+            background_tasks.add_task(send_email, user_email, otp)
+
+        return JSONResponse({
+            "status": 200,
+            "message": "A new code has been sent to your email.",
+            "otp_sent_to": _mask_deletion_email(user_email or ""),
+        })
+    except Exception as e:
+        logger.error(f"Error in /delete-account/resend-otp: {e}")
+        return JSONResponse(status_code=500, content={"message": "Server error", "status": 500})
+
+
 # User save push token endpoint
 @router.post("/save-push-token")
 async def save_push_token(payload: dict, data: dict = Depends(get_token)):

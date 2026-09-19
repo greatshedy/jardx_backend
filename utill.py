@@ -536,6 +536,67 @@ def send_wallet_credit_email(receiver_email, user_name, amount, new_balance):
         print("ERROR sending wallet credit email:", e)
 
 
+def send_account_deletion_request_email(admin_emails, user_name, user_email, reason, request_id):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    recipients = [e.strip() for e in (admin_emails or []) if e and e.strip()]
+    if not recipients:
+        return
+
+    requested_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    reason_display = reason.strip() if reason and reason.strip() else "No reason provided"
+
+    html_content = f"""
+    <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; }}
+                .container {{ max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 36px; border-radius: 12px; border-top: 6px solid #DC2626; box-shadow: 0 4px 15px rgba(0,0,0,0.06); }}
+                h1 {{ color: #DC2626; margin: 0 0 8px 0; font-size: 22px; }}
+                .badge {{ display: inline-block; padding: 6px 14px; background-color: #FEE2E2; color: #B91C1C; border-radius: 20px; font-weight: bold; font-size: 12px; letter-spacing: .5px; text-transform: uppercase; }}
+                .content {{ line-height: 1.6; font-size: 15px; color: #555; margin-top: 20px; }}
+                .details {{ background-color: #FEF2F2; border-left: 4px solid #DC2626; padding: 18px 20px; border-radius: 8px; margin: 22px 0; }}
+                .row {{ padding: 5px 0; }}
+                .label {{ color: #777; font-weight: bold; }}
+                .value {{ color: #222; }}
+                .footer {{ text-align: center; margin-top: 32px; font-size: 12px; color: #aaa; border-top: 1px solid #eee; padding-top: 18px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Account Deletion Request</h1>
+                <span class="badge">Action Required</span>
+                <div class="content">
+                    <p>A JardX user has verified their email and requested that their account be deleted.</p>
+                    <div class="details">
+                        <div class="row"><span class="label">Name:</span> <span class="value">{user_name or 'Not provided'}</span></div>
+                        <div class="row"><span class="label">Email:</span> <span class="value">{user_email}</span></div>
+                        <div class="row"><span class="label">Reason:</span> <span class="value">{reason_display}</span></div>
+                        <div class="row"><span class="label">Request ID:</span> <span class="value">{request_id}</span></div>
+                        <div class="row"><span class="label">Requested:</span> <span class="value">{requested_at}</span></div>
+                    </div>
+                    <p>Please review this request in the Jarvad admin dashboard under <strong>Deletion Requests</strong> and approve or reject it.</p>
+                </div>
+                <div class="footer">
+                    <p>© {datetime.now().year} JardX Technologies. All rights reserved.</p>
+                    <p>This is an automated notification. Please do not reply to this email.</p>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+    try:
+        resend.Emails.send({
+            "from": sender,
+            "to": recipients,
+            "subject": f"Account Deletion Request - {user_name or user_email}",
+            "html": html_content
+        })
+        print(f"SUCCESS: Account deletion request email sent to {recipients}")
+    except Exception as e:
+        print("ERROR sending account deletion request email:", e)
+
+
 def _is_partner(user):
     """Check if a user is a JardPartner (not a vendor)."""
     if not user:
