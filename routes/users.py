@@ -22,6 +22,119 @@ logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
+# Historical default fees used as a fallback for legacy records that predate
+# the `subscription_fee` field (so existing users still get an increase notice).
+VENDOR_DEFAULT_FEE = 25000
+PARTNER_DEFAULT_FEE = 100000
+VENDOR_FEE_PURPOSES = ("Vendor Registration Fee", "Vendor Subscription Renewal")
+PARTNER_FEE_PURPOSES = ("Partner Registration Fee", "Partner Subscription Renewal")
+
+
+def _resolve_locked_fee(record, default_fee, purposes):
+    """Return the subscription fee an account is locked into.
+
+    Prefers the stored `subscription_fee`; falls back to the most recent
+    matching subscription transaction amount; then to the historical default.
+    """
+    try:
+        stored = record.get("subscription_fee")
+        if stored is not None and float(stored) > 0:
+            return float(stored)
+    except (TypeError, ValueError):
+        pass
+
+    user_id = record.get("user_id")
+    if user_id:
+        try:
+            txs = transactions_collection.find(
+                {"user_id": user_id},
+                projection={"amount": 1, "purpose": 1, "created_at": 1},
+            ).sort({"created_at": -1})
+            for tx in txs:
+                if (tx.get("purpose") or "") in purposes and tx.get("amount") is not None:
+                    try:
+                        amount = float(tx["amount"])
+                        if amount > 0:
+                            return amount
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as e:
+            logger.error(f"_resolve_locked_fee transaction lookup failed: {e}")
+
+    return float(default_fee)
+
+
+def _fee_notice(record, current_fee, default_fee, purposes, status=None):
+    """Build the fee-increase notice payload for a vendor/partner record."""
+    locked_fee = _resolve_locked_fee(record, default_fee, purposes)
+    try:
+        current_fee = float(current_fee)
+    except (TypeError, ValueError):
+        current_fee = float(default_fee)
+
+    increased = current_fee > locked_fee
+    if status is not None and status not in ("active", "grace"):
+        increased = False
+
+    ack = record.get("fee_notice_acknowledged_fee")
+    try:
+        ack_fee = float(ack) if ack is not None else None
+    except (TypeError, ValueError):
+        ack_fee = None
+    if ack_fee is not None and ack_fee >= current_fee:
+        increased = False
+
+    return {
+        "current_fee": current_fee,
+        "locked_fee": locked_fee,
+        "fee_increased": increased,
+    }
+
+
+@router.get("/subscription-config")
+async def get_subscription_config(data: dict = Depends(get_token)):
+    """Current subscription pricing so the app can display live fees."""
+    try:
+        settings = get_settings()
+        return JSONResponse({
+            "status": 200,
+            "data": {
+                "vendor_fee": float(settings.get("vendor_fee", VENDOR_DEFAULT_FEE)),
+                "partner_fee": float(settings.get("partner_fee", PARTNER_DEFAULT_FEE)),
+                "sub_duration_months": int(settings.get("sub_duration_months", 12)),
+                "penalty_percentage": float(settings.get("penalty_percentage", 5)),
+            }
+        }, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /subscription-config: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.post("/acknowledge-fee-notice")
+async def acknowledge_fee_notice(payload: dict, data: dict = Depends(get_token)):
+    """Dismiss the in-app fee-increase notice for the current fee value."""
+    try:
+        user_id = data["id"]
+        notice_type = (payload or {}).get("type", "vendor")
+        fee = (payload or {}).get("fee")
+        if fee is None:
+            return JSONResponse({"message": "Fee value is required", "status": 400}, status_code=400)
+        try:
+            fee_val = float(fee)
+        except (TypeError, ValueError):
+            return JSONResponse({"message": "Invalid fee value", "status": 400}, status_code=400)
+
+        collection = partners_collection if notice_type == "partner" else vendors_collection
+        collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"fee_notice_acknowledged_fee": fee_val}}
+        )
+        return JSONResponse({"message": "Notice acknowledged", "status": 200}, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /acknowledge-fee-notice: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
 @router.post("/vendor-register")
 async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
     try:
@@ -51,6 +164,7 @@ async def vendor_register(vendor: JardAccount, data: dict = Depends(get_token)):
         vendor_record["subscription_start"] = datetime.datetime.utcnow().isoformat()
         vendor_record["subscription_expiry"] = expiry
         vendor_record["subscription_status"] = "active"
+        vendor_record["subscription_fee"] = float(fee)
         
         vendors_collection.insert_one(vendor_record)
         
@@ -97,6 +211,8 @@ async def get_vendor_subscription(data: dict = Depends(get_token)):
     try:
         user_id = data["id"]
         vendor_data = vendors_collection.find_one({"user_id": user_id})
+        settings = get_settings()
+        current_fee = float(settings.get("vendor_fee", VENDOR_DEFAULT_FEE))
         
         if not vendor_data:
             return JSONResponse({
@@ -104,13 +220,14 @@ async def get_vendor_subscription(data: dict = Depends(get_token)):
                 "data": {
                     "subscription_status": "none",
                     "subscription_expiry": None,
+                    "current_fee": current_fee,
+                    "locked_fee": current_fee,
+                    "fee_increased": False,
                 }
             }, status_code=200)
         
         subscription_expiry = vendor_data.get("subscription_expiry")
         subscription_status = vendor_data.get("subscription_status", "active")
-
-        settings = get_settings()
 
         if not subscription_expiry:
             subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
@@ -143,11 +260,15 @@ async def get_vendor_subscription(data: dict = Depends(get_token)):
                         )
                         subscription_status = "expired"
         
+        notice = _fee_notice(
+            vendor_data, current_fee, VENDOR_DEFAULT_FEE, VENDOR_FEE_PURPOSES, subscription_status
+        )
         return JSONResponse({
             "status": 200,
             "data": {
                 "subscription_expiry": subscription_expiry,
                 "subscription_status": subscription_status,
+                **notice,
             }
         }, status_code=200)
     except Exception as e:
@@ -175,6 +296,9 @@ async def renew_vendor_subscription(data: dict = Depends(get_token)):
             {"$set": {
                 "subscription_expiry": new_expiry,
                 "subscription_status": "active",
+                "subscription_start": datetime.datetime.utcnow().isoformat(),
+                "subscription_fee": float(fee),
+                "fee_notice_acknowledged_fee": float(fee),
             }}
         )
         
@@ -579,6 +703,7 @@ async def partner_register(partner: JardAccount, data: dict = Depends(get_token)
         partner_record["subscription_start"] = datetime.datetime.utcnow().isoformat()
         partner_record["subscription_expiry"] = expiry
         partner_record["subscription_status"] = "active"
+        partner_record["subscription_fee"] = float(fee)
         
         partners_collection.insert_one(partner_record)
         
@@ -827,6 +952,8 @@ async def get_partner_subscription(data: dict = Depends(get_token)):
     try:
         user_id = data["id"]
         partner_data = partners_collection.find_one({"user_id": user_id})
+        settings = get_settings()
+        current_fee = float(settings.get("partner_fee", PARTNER_DEFAULT_FEE))
         
         if not partner_data:
             return JSONResponse({
@@ -834,13 +961,14 @@ async def get_partner_subscription(data: dict = Depends(get_token)):
                 "data": {
                     "subscription_status": "none",
                     "subscription_expiry": None,
+                    "current_fee": current_fee,
+                    "locked_fee": current_fee,
+                    "fee_increased": False,
                 }
             }, status_code=200)
         
         subscription_expiry = partner_data.get("subscription_expiry")
         subscription_status = partner_data.get("subscription_status", "active")
-
-        settings = get_settings()
 
         if not subscription_expiry:
             subscription_expiry = (datetime.datetime.utcnow() + relativedelta(months=int(settings.get("sub_duration_months", 12)))).isoformat()
@@ -873,11 +1001,15 @@ async def get_partner_subscription(data: dict = Depends(get_token)):
                         )
                         subscription_status = "expired"
         
+        notice = _fee_notice(
+            partner_data, current_fee, PARTNER_DEFAULT_FEE, PARTNER_FEE_PURPOSES, subscription_status
+        )
         return JSONResponse({
             "status": 200,
             "data": {
                 "subscription_expiry": subscription_expiry,
                 "subscription_status": subscription_status,
+                **notice,
             }
         }, status_code=200)
     except Exception as e:
@@ -905,6 +1037,9 @@ async def renew_partner_subscription(data: dict = Depends(get_token)):
             {"$set": {
                 "subscription_expiry": new_expiry,
                 "subscription_status": "active",
+                "subscription_start": datetime.datetime.utcnow().isoformat(),
+                "subscription_fee": float(fee),
+                "fee_notice_acknowledged_fee": float(fee),
             }}
         )
         

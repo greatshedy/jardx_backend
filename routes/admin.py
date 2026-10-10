@@ -1033,23 +1033,44 @@ async def update_subscription_settings(payload: dict):
         if not existing:
             existing = {}
         existing.pop("_id", None)
-        allowed = [
-            "vendor_fee", "partner_fee",
-            "sub_duration_months", "penalty_percentage"
-        ]
-        for key in allowed:
-            if key in payload:
-                existing[key] = payload[key]
-        if existing.get("vendor_fee"):
-            existing["vendor_fee"] = float(existing["vendor_fee"])
-        if existing.get("partner_fee"):
-            existing["partner_fee"] = float(existing["partner_fee"])
-        if existing.get("sub_duration_months"):
-            existing["sub_duration_months"] = int(existing["sub_duration_months"])
-        if existing.get("penalty_percentage"):
-            existing["penalty_percentage"] = float(existing["penalty_percentage"])
+
+        def _num(value, field):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{field} must be a number")
+            if parsed != parsed:  # reject NaN
+                raise ValueError(f"{field} must be a number")
+            return parsed
+
+        if "vendor_fee" in payload:
+            fee = _num(payload["vendor_fee"], "vendor_fee")
+            if fee <= 0:
+                return JSONResponse({"message": "Vendor fee must be greater than 0", "status": 400})
+            existing["vendor_fee"] = fee
+
+        if "partner_fee" in payload:
+            fee = _num(payload["partner_fee"], "partner_fee")
+            if fee <= 0:
+                return JSONResponse({"message": "Partner fee must be greater than 0", "status": 400})
+            existing["partner_fee"] = fee
+
+        if "sub_duration_months" in payload:
+            months = int(_num(payload["sub_duration_months"], "sub_duration_months"))
+            if months < 1:
+                return JSONResponse({"message": "Subscription duration must be at least 1 month", "status": 400})
+            existing["sub_duration_months"] = months
+
+        if "penalty_percentage" in payload:
+            penalty = _num(payload["penalty_percentage"], "penalty_percentage")
+            if penalty < 0:
+                return JSONResponse({"message": "Penalty percentage cannot be negative", "status": 400})
+            existing["penalty_percentage"] = penalty
+
         sub_settings_collection.replace_one({}, existing, upsert=True)
         return JSONResponse({"message": "Settings updated", "data": existing, "status": 200})
+    except ValueError as ve:
+        return JSONResponse({"message": str(ve), "status": 400})
     except Exception as e:
         logger.error(f"Error updating subscription settings: {e}")
         return JSONResponse({"message": str(e), "status": 500})
