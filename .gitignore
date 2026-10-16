@@ -13,6 +13,11 @@ env/
 .env.local
 .env.*
 
+# Migration artifacts (contain PII / full data dumps - MUST NOT BE PUSHED)
+firebase_dump/
+migration_dump/
+migration_dump_live/
+
 # IDEs and Editors
 .vscode/
 .idea/

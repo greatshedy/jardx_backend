@@ -597,6 +597,73 @@ def send_account_deletion_request_email(admin_emails, user_name, user_email, rea
         print("ERROR sending account deletion request email:", e)
 
 
+def send_manual_payment_admin_email(admin_emails, user_name, user_email, amount, tx_ref, proof_url="", dashboard_url=""):
+    """Notify admins that a manual bank-transfer payment is awaiting approval."""
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    recipients = [e.strip() for e in (admin_emails or []) if e and e.strip()]
+    if not recipients:
+        return
+
+    amount_str = f"\u20a6{float(amount or 0):,.2f}"
+    submitted_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    proof_block = f'<div class="row"><span class="label">Proof:</span> <span class="value"><a href="{proof_url}">View payment proof</a></span></div>' if proof_url else ""
+    cta_block = f'<p style="text-align:center;margin:26px 0;"><a href="{dashboard_url}" style="background:#FF6900;color:#fff;text-decoration:none;padding:14px 28px;border-radius:10px;font-weight:bold;display:inline-block;">Review &amp; Approve Payment</a></p>' if dashboard_url else ""
+
+    html_content = f"""
+    <html>
+        <head>
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; }}
+                .container {{ max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 36px; border-radius: 12px; border-top: 6px solid #FF6900; box-shadow: 0 4px 15px rgba(0,0,0,0.06); }}
+                h1 {{ color: #FF6900; margin: 0 0 8px 0; font-size: 22px; }}
+                .badge {{ display: inline-block; padding: 6px 14px; background-color: #FFF1E6; color: #C2410C; border-radius: 20px; font-weight: bold; font-size: 12px; letter-spacing: .5px; text-transform: uppercase; }}
+                .content {{ line-height: 1.6; font-size: 15px; color: #555; margin-top: 20px; }}
+                .details {{ background-color: #FFF7ED; border-left: 4px solid #FF6900; padding: 18px 20px; border-radius: 8px; margin: 22px 0; }}
+                .row {{ padding: 5px 0; }}
+                .label {{ color: #777; font-weight: bold; }}
+                .value {{ color: #222; }}
+                .amount {{ font-size: 26px; font-weight: bold; color: #FF6900; margin: 8px 0 0 0; }}
+                .footer {{ text-align: center; margin-top: 32px; font-size: 12px; color: #aaa; border-top: 1px solid #eee; padding-top: 18px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>New Bank Transfer Payment</h1>
+                <span class="badge">Action Required</span>
+                <p class="amount">{amount_str}</p>
+                <div class="content">
+                    <p>A user has submitted a manual bank-transfer payment that needs verification.</p>
+                    <div class="details">
+                        <div class="row"><span class="label">User:</span> <span class="value">{user_name or 'Not provided'}</span></div>
+                        <div class="row"><span class="label">Email:</span> <span class="value">{user_email or 'N/A'}</span></div>
+                        <div class="row"><span class="label">Reference:</span> <span class="value">{tx_ref}</span></div>
+                        <div class="row"><span class="label">Submitted:</span> <span class="value">{submitted_at}</span></div>
+                        {proof_block}
+                    </div>
+                    <p>Approve it in the admin dashboard under <strong>Finance &rarr; Pending</strong> to credit the user's wallet automatically.</p>
+                    {cta_block}
+                </div>
+                <div class="footer">
+                    <p>&copy; {datetime.now().year} JardX Technologies. All rights reserved.</p>
+                    <p>This is an automated notification. Please do not reply to this email.</p>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+    try:
+        resend.Emails.send({
+            "from": sender,
+            "to": recipients,
+            "subject": f"New Bank Transfer Payment {amount_str} - {user_name or user_email}",
+            "html": html_content
+        })
+        print(f"SUCCESS: Manual payment admin email sent to {recipients}")
+    except Exception as e:
+        print("ERROR sending manual payment admin email:", e)
+
+
 def _is_partner(user):
     """Check if a user is a JardPartner (not a vendor)."""
     if not user:

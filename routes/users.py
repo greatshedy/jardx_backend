@@ -29,6 +29,9 @@ PARTNER_DEFAULT_FEE = 100000
 VENDOR_FEE_PURPOSES = ("Vendor Registration Fee", "Vendor Subscription Renewal")
 PARTNER_FEE_PURPOSES = ("Partner Registration Fee", "Partner Subscription Renewal")
 
+# Default support WhatsApp number, overridable from the admin dashboard.
+SUPPORT_WHATSAPP_DEFAULT = "2347085579245"
+
 
 def _resolve_locked_fee(record, default_fee, purposes):
     """Return the subscription fee an account is locked into.
@@ -108,6 +111,28 @@ async def get_subscription_config(data: dict = Depends(get_token)):
     except Exception as e:
         logger.error(f"Error in /subscription-config: {e}")
         return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.get("/app-config")
+async def get_app_config():
+    """Public app configuration (support contact, etc.).
+
+    Intentionally unauthenticated so it is reachable even on screens where the
+    user has no valid token (e.g. the restricted/blocked-account state).
+    """
+    try:
+        settings = get_settings()
+        support_whatsapp = str(settings.get("support_whatsapp") or SUPPORT_WHATSAPP_DEFAULT).strip()
+        return JSONResponse({
+            "status": 200,
+            "data": {"support_whatsapp": support_whatsapp or SUPPORT_WHATSAPP_DEFAULT},
+        }, status_code=200)
+    except Exception as e:
+        logger.error(f"Error in /app-config: {e}")
+        return JSONResponse({
+            "status": 200,
+            "data": {"support_whatsapp": SUPPORT_WHATSAPP_DEFAULT},
+        }, status_code=200)
 
 
 @router.post("/acknowledge-fee-notice")
@@ -2311,62 +2336,7 @@ async def get_notifications(data: dict = Depends(get_token)):
         user_id = data["id"]
         
         notifications = list(notifications_collection.find({"user_id": user_id}))
-        if not notifications:
-            # Seed 5 stunning mockup notifications matching their image perfectly!
-            now = datetime.datetime.utcnow()
-            today_date = now.strftime("%Y-%m-%dT")
-            yesterday_date = (now - datetime.timedelta(days=1)).strftime("%Y-%m-%dT")
-            
-            mockups = [
-                {
-                    "user_id": user_id,
-                    "title": "Wallet Funded (Monnify)",
-                    "body": "Your wallet has been credited with ₦100,000.",
-                    "type": "PAYMENT",
-                    "action_text": "View",
-                    "created_at": f"{today_date}12:39:00Z",
-                    "is_read": False
-                },
-                {
-                    "user_id": user_id,
-                    "title": "Payment Reminder",
-                    "body": "Your next payment for Ebenezery Estate is due in 8 days.",
-                    "type": "PAYMENT",
-                    "action_text": "View",
-                    "created_at": f"{today_date}09:40:00Z",
-                    "is_read": False
-                },
-                {
-                    "user_id": user_id,
-                    "title": "Payment Reminder",
-                    "body": "You have an outstanding payment due for your property plan.",
-                    "type": "PAYMENT",
-                    "action_text": "Pay Now",
-                    "created_at": f"{today_date}07:05:00Z",
-                    "is_read": True
-                },
-                {
-                    "user_id": user_id,
-                    "title": "Payment Failed",
-                    "body": "We couldn't process your recent payment. Please try again.",
-                    "type": "PAYMENT",
-                    "action_text": "View",
-                    "created_at": f"{today_date}19:10:00Z",
-                    "is_read": True
-                },
-                {
-                    "user_id": user_id,
-                    "title": "Contribution Reminder",
-                    "body": "Your monthly JardKidz contribution is due tomorrow.",
-                    "type": "PAYMENT",
-                    "action_text": "View",
-                    "created_at": f"{yesterday_date}04:20:00Z",
-                    "is_read": False
-                }
-            ]
-            notifications_collection.insert_many(mockups)
-            notifications = list(notifications_collection.find({"user_id": user_id}))
-            
+
         # Sort by created_at descending
         notifications.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         

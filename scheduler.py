@@ -47,7 +47,8 @@ def get_settings():
             "vendor_fee": 25000,
             "partner_fee": 100000,
             "sub_duration_months": 12,
-            "penalty_percentage": 5
+            "penalty_percentage": 5,
+            "support_whatsapp": "2347085579245"
         }
     return doc
 

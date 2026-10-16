@@ -111,7 +111,8 @@ if "subscription_settings" not in db_aux.list_collection_names():
             "vendor_fee": 25000,
             "partner_fee": 100000,
             "sub_duration_months": 12,
-            "penalty_percentage": 5
+            "penalty_percentage": 5,
+            "support_whatsapp": "2347085579245"
         })
     except Exception:
         sub_settings_collection = db_aux.get_collection("subscription_settings")
@@ -135,5 +136,22 @@ if "deletion_requests" not in db_aux.list_collection_names():
         deletion_requests_collection = db_aux.get_collection("deletion_requests")
 else:
     deletion_requests_collection = db_aux.get_collection("deletion_requests")
+
+if "admin_push_subscriptions" not in db_aux.list_collection_names():
+    try:
+        admin_push_subscriptions_collection = db_aux.create_collection("admin_push_subscriptions")
+    except Exception as e:
+        print(f"Error creating admin_push_subscriptions collection: {e}")
+        try:
+            admin_push_subscriptions_collection = db_aux.get_collection("admin_push_subscriptions")
+        except Exception as e2:
+            print(f"admin_push_subscriptions unavailable: {e2}")
+            admin_push_subscriptions_collection = None
+else:
+    try:
+        admin_push_subscriptions_collection = db_aux.get_collection("admin_push_subscriptions")
+    except Exception as e:
+        print(f"Error getting admin_push_subscriptions collection: {e}")
+        admin_push_subscriptions_collection = None
 
 print("Astra DB connection initialized successfully.")

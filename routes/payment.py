@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, File, UploadFile, Form
-from db.database import user_collection, transactions_collection
-from utill import get_token, process_referral_logic
+from fastapi import APIRouter, Depends, HTTPException, status, Request, File, UploadFile, Form, BackgroundTasks
+from db.database import user_collection, transactions_collection, notifications_collection
+from utill import get_token, process_referral_logic, send_manual_payment_admin_email
 from utils.payment_gateways.factory import PaymentGatewayFactory
+from utils.webpush_service import send_admin_web_push
 import secrets
 import datetime
 import calendar
+import os
 from fastapi.responses import JSONResponse, HTMLResponse
 import logging
 
@@ -472,6 +474,7 @@ async def payment_callback(
 
 @router.post("/manual-transfer")
 async def manual_transfer(
+    background_tasks: BackgroundTasks,
     amount: float = Form(...),
     proof: UploadFile = File(...),
     data: dict = Depends(get_token)
@@ -512,7 +515,56 @@ async def manual_transfer(
             "proof_url": proof_url,
             "created_at": datetime.datetime.utcnow().isoformat()
         })
-        
+
+        # --- Notify admins (in-app + email + web push). Never block the response. ---
+        try:
+            user_doc = user_collection.find_one({"_id": user_id}) or {}
+            u_name = user_doc.get("user_name", "User")
+            u_email = user_doc.get("email", "")
+            amount_val = float(amount)
+            now_iso = datetime.datetime.utcnow().isoformat()
+            admin_emails = [
+                e.strip().lower()
+                for e in os.getenv("ADMIN_EMAILS", "jarvadgroup.business@gmail.com").split(",")
+                if e.strip()
+            ]
+
+            # In-app notifications for admin user accounts
+            try:
+                admin_ids = []
+                for em in admin_emails:
+                    admin_doc = user_collection.find_one({"email": em}, projection={"_id": 1})
+                    if admin_doc:
+                        admin_ids.append(str(admin_doc["_id"]))
+                if admin_ids:
+                    notifications_collection.insert_many([{
+                        "user_id": aid,
+                        "title": "Bank Transfer Payment",
+                        "body": f"{u_name} submitted a bank transfer of \u20a6{amount_val:,.2f}. Tap to review.",
+                        "type": "PAYMENT",
+                        "action_text": "Review",
+                        "tx_ref": tx_ref,
+                        "is_read": False,
+                        "created_at": now_iso,
+                    } for aid in admin_ids])
+            except Exception as ne:
+                logger.error(f"manual transfer admin in-app notify failed: {ne}")
+
+            dashboard_url = f"https://jarvad-admin.vercel.app/dashboard?view=finance&filter=PENDING&tx={tx_ref}"
+            background_tasks.add_task(
+                send_manual_payment_admin_email,
+                admin_emails, u_name, u_email, amount_val, tx_ref, proof_url, dashboard_url
+            )
+            background_tasks.add_task(
+                send_admin_web_push,
+                "New Bank Transfer Payment",
+                f"{u_name} submitted \u20a6{amount_val:,.2f}. Tap to review.",
+                dashboard_url,
+                tx_ref,
+            )
+        except Exception as notify_err:
+            logger.error(f"manual transfer admin notify failed: {notify_err}")
+
         return {"status": "success", "message": "Transfer notification sent. It will be verified within 24-48 hours."}
 
     except Exception as e:

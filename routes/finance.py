@@ -121,18 +121,25 @@ def serialize_astra_data(data):
         return data
 
 @router.get("/transactions")
-async def get_all_transactions(page: int = 1, page_size: int = 15):
+async def get_all_transactions(page: int = 1, page_size: int = 15, tx_ref: str = "", status_filter: str = ""):
     try:
         skip = (page - 1) * page_size if page > 0 else 0
+
+        query = {}
+        if tx_ref:
+            query["tx_ref"] = tx_ref
+        if status_filter and status_filter.upper() != "ALL":
+            query["status"] = status_filter
+
         try:
-            total_count = transactions_collection.count_documents({}, upper_bound=10000)
+            total_count = transactions_collection.count_documents(query, upper_bound=10000)
         except:
-            total_count = len(list(transactions_collection.find({}, projection={"_id": 1})))
+            total_count = len(list(transactions_collection.find(query, projection={"_id": 1})))
             
         total_pages = (total_count + page_size - 1) // page_size
 
         cursor = transactions_collection.find(
-            {}, 
+            query, 
             sort={"created_at": -1},
             limit=page_size,
             skip=skip

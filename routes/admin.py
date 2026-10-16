@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException
+from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException, Query
 from typing import List
 from model import House, JardKidzPlan
 from fastapi.responses import JSONResponse, FileResponse
@@ -10,7 +10,7 @@ import os
 import secrets
 import json
 import datetime
-from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection
+from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection, admin_push_subscriptions_collection
 
 logger = logging.getLogger("jardx")
 
@@ -363,28 +363,158 @@ async def get_child_investments():
 # --- USER MANAGEMENT ENDPOINTS ---
 
 @router.get("/users")
-async def get_all_users():
+async def get_all_users(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: str = Query(""),
+    status_filter: str = Query("ALL", alias="status"),
+):
     try:
-        # Fetch all users, excluding sensitive fields
+        # Fetch users, excluding sensitive fields
         projection = {
             "password": 0,
             "transaction_pin": 0,
             "otp": 0
         }
-        all_users = list(user_collection.find({}, projection=projection))
-        
-        # Clean data for JSON (Astra IDs)
+
+        query = {}
+        if status_filter and status_filter.upper() != "ALL":
+            query["status"] = status_filter
+
+        search = (search or "").strip().lower()
+
+        if search:
+            # Substring search across name/email (Data API has no regex), then paginate in Python
+            all_users = list(user_collection.find(query, projection=projection))
+            matched = [
+                u for u in all_users
+                if search in (u.get("user_name", "") or "").lower()
+                or search in (u.get("email", "") or "").lower()
+            ]
+            total_count = len(matched)
+            total_pages = max(1, (total_count + page_size - 1) // page_size)
+            start = (page - 1) * page_size
+            page_users = matched[start:start + page_size]
+        else:
+            try:
+                total_count = user_collection.count_documents(query, upper_bound=1000000)
+            except Exception:
+                total_count = len(list(user_collection.find(query, projection={"_id": 1})))
+            total_pages = max(1, (total_count + page_size - 1) // page_size)
+            page_users = list(user_collection.find(
+                query,
+                limit=page_size,
+                skip=(page - 1) * page_size,
+                projection=projection,
+            ))
+
         cleaned_users = []
-        for u in all_users:
+        for u in page_users:
             u_clean = dict(u)
             u_clean["_id"] = str(u["_id"])
             cleaned_users.append(u_clean)
-            
-        logger.info(f"Admin fetched {len(cleaned_users)} users")
-        return JSONResponse({"message": "Users fetched successfully", "data": cleaned_users, "status": 200})
+
+        logger.info(f"Admin fetched users page {page} ({len(cleaned_users)} of {total_count})")
+        return JSONResponse({
+            "message": "Users fetched successfully",
+            "data": cleaned_users,
+            "pagination": {
+                "total_count": total_count,
+                "total_pages": total_pages,
+                "current_page": page,
+                "page_size": page_size,
+            },
+            "status": 200,
+        })
     except Exception as e:
         logger.error(f"Error fetching users: {e}")
         return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.get("/users/{user_id}/referrals")
+async def get_user_referrals(user_id: str):
+    """Users referred by the given user, plus their total referral earnings."""
+    try:
+        projection = {"password": 0, "transaction_pin": 0, "otp": 0}
+        referred = list(user_collection.find({"referred_by": user_id}, projection=projection))
+
+        cleaned = []
+        for u in referred:
+            uc = dict(u)
+            uc["_id"] = str(u["_id"])
+            cleaned.append(uc)
+
+        earnings = 0.0
+        try:
+            credits = list(transactions_collection.find(
+                {"user_id": user_id, "gateway": "Referral System"},
+                projection={"amount": 1, "type": 1},
+            ))
+            earnings = sum(float(c.get("amount", 0) or 0) for c in credits if (c.get("type") == "CREDIT"))
+        except Exception as earn_err:
+            logger.error(f"Error computing referral earnings for {user_id}: {earn_err}")
+
+        return JSONResponse({
+            "message": "Referrals fetched",
+            "data": cleaned,
+            "count": len(cleaned),
+            "earnings": earnings,
+            "status": 200,
+        })
+    except Exception as e:
+        logger.error(f"Error fetching referrals for {user_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+# --- WEB PUSH (ADMIN BROWSER NOTIFICATIONS) ---
+
+@router.get("/push/public-key")
+async def push_public_key():
+    return JSONResponse({"publicKey": os.getenv("VAPID_PUBLIC_KEY", ""), "status": 200})
+
+
+@router.post("/push/subscribe")
+async def push_subscribe(payload: dict, admin: dict = Depends(verify_admin_token)):
+    try:
+        sub = (payload or {}).get("subscription") or (payload or {})
+        endpoint = sub.get("endpoint")
+        keys = sub.get("keys") or {}
+        if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+            return JSONResponse({"message": "Invalid push subscription", "status": 400})
+
+        email = (admin.get("email") or "").lower()
+        now = datetime.datetime.utcnow().isoformat()
+        doc = {
+            "endpoint": endpoint,
+            "keys": {"p256dh": keys.get("p256dh"), "auth": keys.get("auth")},
+            "admin_email": email,
+            "user_agent": (payload or {}).get("user_agent", ""),
+            "updated_at": now,
+        }
+        existing = admin_push_subscriptions_collection.find_one({"endpoint": endpoint})
+        if existing:
+            admin_push_subscriptions_collection.update_one({"_id": existing["_id"]}, {"$set": doc})
+        else:
+            doc["created_at"] = now
+            admin_push_subscriptions_collection.insert_one(doc)
+        logger.info(f"Admin push subscription saved for {email}")
+        return JSONResponse({"message": "Subscribed", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /push/subscribe: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
+
+@router.post("/push/unsubscribe")
+async def push_unsubscribe(payload: dict):
+    try:
+        endpoint = (payload or {}).get("endpoint")
+        if endpoint:
+            admin_push_subscriptions_collection.delete_one({"endpoint": endpoint})
+        return JSONResponse({"message": "Unsubscribed", "status": 200})
+    except Exception as e:
+        logger.error(f"Error in /push/unsubscribe: {e}")
+        return JSONResponse({"message": str(e), "status": 500})
+
 
 @router.put("/update-user/{user_id}")
 async def update_user(user_id: str, data: dict):
@@ -1066,6 +1196,13 @@ async def update_subscription_settings(payload: dict):
             if penalty < 0:
                 return JSONResponse({"message": "Penalty percentage cannot be negative", "status": 400})
             existing["penalty_percentage"] = penalty
+
+        if "support_whatsapp" in payload:
+            raw = str(payload.get("support_whatsapp") or "").strip()
+            digits = "".join(ch for ch in raw if ch.isdigit())
+            if not raw or not digits:
+                return JSONResponse({"message": "Support WhatsApp number is required", "status": 400})
+            existing["support_whatsapp"] = digits
 
         sub_settings_collection.replace_one({}, existing, upsert=True)
         return JSONResponse({"message": "Settings updated", "data": existing, "status": 200})
