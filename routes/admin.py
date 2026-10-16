@@ -403,6 +403,7 @@ async def get_all_users(
             total_pages = max(1, (total_count + page_size - 1) // page_size)
             page_users = list(user_collection.find(
                 query,
+                sort={"_id": 1},
                 limit=page_size,
                 skip=(page - 1) * page_size,
                 projection=projection,
