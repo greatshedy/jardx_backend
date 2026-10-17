@@ -17,6 +17,7 @@ env/
 firebase_dump/
 migration_dump/
 migration_dump_live/
+migration_dump_preclean/
 
 # IDEs and Editors
 .vscode/
