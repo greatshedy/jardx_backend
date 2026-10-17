@@ -1845,6 +1845,40 @@ async def verify_pin_reset_otp(payload: dict, data: dict = Depends(get_token)):
 
 
 # User listing endpoint
+def _plan_has_price(plan):
+    if not isinstance(plan, dict):
+        return False
+    try:
+        float(plan.get("outrightPrice"))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_house_pricing(house):
+    """Ensure house_pricing_plan[0] has a numeric outrightPrice.
+
+    Fills a missing outrightPrice from price/originalPrice, moves a priced plan
+    to the front, and returns False when no usable price exists (caller skips it).
+    """
+    plan = house.get("house_pricing_plan")
+    if not isinstance(plan, list):
+        plan = []
+    for p in plan:
+        if isinstance(p, dict) and p.get("outrightPrice") in (None, ""):
+            try:
+                p["outrightPrice"] = float(p.get("price", p.get("originalPrice")))
+            except (TypeError, ValueError):
+                pass
+    if not plan or not _plan_has_price(plan[0]):
+        for i, p in enumerate(plan):
+            if _plan_has_price(p):
+                plan.insert(0, plan.pop(i))
+                break
+    house["house_pricing_plan"] = plan
+    return bool(plan) and _plan_has_price(plan[0])
+
+
 @router.post("/listing")
 async def Listing():
     house_data=list(house_collection.find({}))
@@ -1860,6 +1894,9 @@ async def Listing():
                 # URL (migrated or new)
                 new_images.append(get_image_url(img))
         house["house_image"] = new_images
+        if not _normalize_house_pricing(house):
+            # No usable price (e.g. sold-out estate with an empty pricing plan)
+            continue
         data.append(house)
     
     return JSONResponse({"message":"House data","data":data,"status":status.HTTP_200_OK})
