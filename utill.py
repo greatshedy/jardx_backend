@@ -679,8 +679,10 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
     They earn only through process_partner_commission on property transactions.
     
     Tiers (standard users only):
+      - below #5k:  non-qualifying (no activation, no bonus, no referrer payout)
       - #5k – #49k: 2% referral link (no self-bonus)
-      - #50k+:      5% referral link + 10% instant self-bonus on first deposit
+      - #50k – #99k: 5% referral link (no self-bonus)
+      - #100k+:     5% referral link + 10% instant self-bonus on first deposit
     """
     # Ensure ID is a string for Astra DB lookup consistency
     uid_str = str(user_id)
@@ -690,6 +692,14 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
     
     # Partners get nothing from the standard referral system
     if _is_partner(user):
+        return
+
+    # Below the minimum qualifying amount: do not activate, do not pay the
+    # referrer, and do NOT consume the one-time referral bonus.
+    try:
+        if float(amount) < 5000:
+            return
+    except (TypeError, ValueError):
         return
     
     # 1. Handle Activation (One-time based on first qualifying payment)
@@ -708,8 +718,8 @@ def process_referral_logic(user_id, amount, user_collection, transactions_collec
             )
             print(f"DEBUG: Referral activated for {user_id} with {percentage}%")
             
-            # Self-bonus: 10% instant credit for #50k+ first deposit
-            if amount >= 50000:
+            # Self-bonus: 10% instant credit for #100k+ first deposit
+            if amount >= 100000:
                 self_bonus = amount * 0.10
                 new_balance = float(user.get("wallet_balance", 0.0)) + self_bonus
                 user_collection.update_one(
