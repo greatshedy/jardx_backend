@@ -97,8 +97,33 @@ def normalize_property_type(value):
     return normalized.replace(" ", "-")
 
 
+def _infer_plan_property_type(plan):
+    explicit = normalize_property_type(plan.get("propertyType") or plan.get("property_type"))
+    if explicit in {"residential", "residential-commercial", "full_commercial"}:
+        return explicit
+    name = str(plan.get("name") or "").strip().lower()
+    if "residential commercial" in name or "residential-commercial" in name:
+        return "residential-commercial"
+    if "full commercial" in name or "fully commercial" in name or "full_commercial" in name:
+        return "full_commercial"
+    if "residential" in name:
+        return "residential"
+    return explicit
+
+
 def get_property_type_price(house, property_type):
     key = normalize_property_type(property_type)
+    plans = house.get("house_pricing_plan") or []
+    for plan in plans:
+        plan_type = _infer_plan_property_type(plan)
+        if plan_type == key:
+            try:
+                value = float(plan.get("outrightPrice") or plan.get("price"))
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+
     prices = house.get("property_type_prices") or {}
     candidates = [key, key.replace("-", "_"), property_type]
     for candidate in candidates:
@@ -109,24 +134,6 @@ def get_property_type_price(house, property_type):
         except (TypeError, ValueError):
             continue
 
-    plans = house.get("house_pricing_plan") or []
-    for plan in plans:
-        plan_type = normalize_property_type(plan.get("propertyType") or plan.get("property_type"))
-        if plan_type == key:
-            try:
-                value = float(plan.get("outrightPrice") or plan.get("price"))
-                if value > 0:
-                    return value
-            except (TypeError, ValueError):
-                pass
-
-    if plans:
-        try:
-            value = float(plans[0].get("outrightPrice") or plans[0].get("price"))
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            pass
     return 0.0
 
 
@@ -381,8 +388,11 @@ def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks,
 
         if market_mode == "land_estate" and property_type:
             priced_target = get_property_type_price(house, property_type)
-            if priced_target > 0:
-                target_amount = priced_target
+            if priced_target <= 0:
+                return JSONResponse(status_code=400, content={
+                    "message": "No pricing plan is configured for the selected property type"
+                })
+            target_amount = priced_target
             if not apartment_type:
                 apartment_type = property_type
 
