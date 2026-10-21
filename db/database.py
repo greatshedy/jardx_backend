@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from astrapy import DataAPIClient
 from astrapy.api_options import APIOptions, TimeoutOptions
+from astrapy.info import CollectionDefinition, CollectionLexicalOptions
 from dotenv import load_dotenv
 import os
 from model import User, Login, JardAccount
@@ -90,6 +91,32 @@ if "reviews" not in existing_collections:
 else:
     reviews_collection = db.get_collection("reviews")
 
+unindexed_definition = CollectionDefinition(
+    lexical=CollectionLexicalOptions(enabled=False),
+    indexing={"deny": ["*"]},
+)
+
+if "distributors" not in existing_collections:
+    try:
+        distributors_collection = db.create_collection("distributors", definition=unindexed_definition)
+    except Exception as e:
+        print(f"Error creating distributors collection: {e}")
+        distributors_collection = db.get_collection("distributors")
+else:
+    distributors_collection = db.get_collection("distributors")
+
+if "housing_subscriptions" not in existing_collections:
+    try:
+        housing_subscriptions_collection = db.create_collection(
+            "housing_subscriptions",
+            definition=unindexed_definition,
+        )
+    except Exception as e:
+        print(f"Error creating housing_subscriptions collection: {e}")
+        housing_subscriptions_collection = db.get_collection("housing_subscriptions")
+else:
+    housing_subscriptions_collection = db.get_collection("housing_subscriptions")
+
 if "reports" not in db_aux.list_collection_names():
     try:
         reports_collection = db_aux.create_collection("reports")
@@ -112,7 +139,9 @@ if "subscription_settings" not in db_aux.list_collection_names():
             "partner_fee": 100000,
             "sub_duration_months": 12,
             "penalty_percentage": 5,
-            "support_whatsapp": "2347085579245"
+            "support_whatsapp": "2347085579245",
+            "housing_registration_fee": 100000,
+            "housing_savings_multiplier": 2.0
         })
     except Exception:
         sub_settings_collection = db_aux.get_collection("subscription_settings")

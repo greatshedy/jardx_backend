@@ -931,6 +931,54 @@ def send_jardproc_invoice_email(receiver_email, user_name, order_id, total_amoun
         print("ERROR sending invoice email:", e)
 
 
+def send_distributor_welcome_email(receiver_email, user_name, distributor_id, product_name, variant_label, quantity, total_amount):
+    sender = os.getenv("RESEND_SENDER", "onboarding@resend.dev")
+    variant_text = f"<p><strong>Variant:</strong> {variant_label}</p>" if variant_label else ""
+
+    html_content = f"""
+    <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; background-color: #f4f4f4; color: #333; padding: 20px; }}
+                .container {{ background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }}
+                h1 {{ color: #ff6900; text-align: center; }}
+                .details {{ text-align: left; background: #F6EEE9; padding: 20px; border-radius: 10px; margin: 20px 0; font-size: 14px; border-left: 4px solid #ff6900; }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #888; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Welcome, Distributor</h1>
+                <p>Hello <strong>{user_name}</strong>,</p>
+                <p>Your JardX distributor registration and payment were successful.</p>
+
+                <div class="details">
+                    <p><strong>Distributor ID:</strong> {distributor_id}</p>
+                    <p><strong>Product:</strong> {product_name}</p>
+                    {variant_text}
+                    <p><strong>Quantity:</strong> {quantity}</p>
+                    <p><strong>Amount Paid:</strong> ₦{total_amount:,.2f}</p>
+                </div>
+
+                <p>We will send the next steps to your email and SMS within the next 24 hours.</p>
+                <div class="footer">© {datetime.now().year} JardX. All rights reserved.</div>
+            </div>
+        </body>
+    </html>
+    """
+
+    try:
+        resend.Emails.send({
+            "from": sender,
+            "to": [receiver_email],
+            "subject": "Welcome to JardX Distributors",
+            "html": html_content
+        })
+        print(f"SUCCESS: Distributor email sent successfully to {receiver_email}")
+    except Exception as e:
+        print("ERROR sending distributor email:", e)
+
+
 # ─────────────────────────────────────────────
 # SUBSCRIPTION & REMINDER EMAIL FUNCTIONS
 # ─────────────────────────────────────────────

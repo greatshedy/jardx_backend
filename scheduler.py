@@ -7,7 +7,8 @@ from cryptography.fernet import Fernet
 from db.database import (
     user_collection, portfolio_collection, transactions_collection,
     vendors_collection, partners_collection, jard_kidz_collection,
-    sub_settings_collection, notifications_collection
+    sub_settings_collection, notifications_collection,
+    housing_subscriptions_collection
 )
 from utill import (
     send_subscription_reminder_email,
@@ -41,16 +42,19 @@ def _decrypt_pin(encrypted: str) -> str:
         return ""
 
 def get_settings():
+    defaults = {
+        "vendor_fee": 25000,
+        "partner_fee": 100000,
+        "sub_duration_months": 12,
+        "penalty_percentage": 5,
+        "support_whatsapp": "2347085579245",
+        "housing_registration_fee": 100000,
+        "housing_savings_multiplier": 2.0,
+    }
     doc = sub_settings_collection.find_one({})
     if not doc:
-        doc = {
-            "vendor_fee": 25000,
-            "partner_fee": 100000,
-            "sub_duration_months": 12,
-            "penalty_percentage": 5,
-            "support_whatsapp": "2347085579245"
-        }
-    return doc
+        return defaults
+    return {**defaults, **doc}
 
 def _duration_delta(settings, base_months=None):
     months = int(base_months or settings.get("sub_duration_months", 12))
@@ -166,6 +170,10 @@ def auto_debit_portfolios():
             if not _is_due(item.get("next_payment_date"), settings):
                 continue
             user_id = item["user_id"]
+            if item.get("housing_subscription_id"):
+                subscription = housing_subscriptions_collection.find_one({"_id": item.get("housing_subscription_id")})
+                if not subscription or subscription.get("status") != "Active":
+                    continue
             monthly = float(item.get("monthly_payment", 0))
             penalty = float(item.get("penalty_amount", 0))
             total_due = monthly + penalty
@@ -184,17 +192,29 @@ def auto_debit_portfolios():
                     nxt = curr + relativedelta(months=1)
                 except Exception:
                     nxt = _now() + relativedelta(months=1)
+                new_amount_paid = float(item.get("amount_paid", 0)) + monthly
                 portfolio_collection.update_one(
                     {"_id": item["_id"]},
                     {"$set": {
                         "months_paid": new_months,
                         "remaining_balance": max(0, remaining),
-                        "amount_paid": float(item.get("amount_paid", 0)) + monthly,
+                        "amount_paid": new_amount_paid,
                         "status": status,
                         "next_payment_date": nxt.isoformat(),
-                        "penalty_amount": 0
+                        "penalty_amount": 0,
+                        "access_limit": round(new_amount_paid * float(item.get("savings_multiplier", 1) or 1), 2),
                     }}
                 )
+                if item.get("housing_subscription_id"):
+                    housing_subscriptions_collection.update_one(
+                        {"_id": item.get("housing_subscription_id")},
+                        {"$set": {
+                            "total_saved": round(new_amount_paid, 2),
+                            "access_limit": round(new_amount_paid * float(item.get("savings_multiplier", 1) or 1), 2),
+                            "status": status,
+                            "updated_at": _now().isoformat(),
+                        }},
+                    )
             else:
                 portfolio_collection.update_one(
                     {"_id": item["_id"]},

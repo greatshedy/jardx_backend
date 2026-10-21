@@ -1894,7 +1894,9 @@ async def Listing():
                 # URL (migrated or new)
                 new_images.append(get_image_url(img))
         house["house_image"] = new_images
-        if not _normalize_house_pricing(house):
+        has_usable_pricing = _normalize_house_pricing(house)
+        has_other_pricing = bool(house.get("property_type_prices")) or bool(house.get("housing_unit_types"))
+        if not has_usable_pricing and not has_other_pricing:
             # No usable price (e.g. sold-out estate with an empty pricing plan)
             continue
         data.append(house)

@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, EmailStr, field_validator
 
 class BankAccount(BaseModel):
@@ -115,6 +116,19 @@ class JardAccount(BaseModel):
     photo: str  # base64 string
     certificate: str  # base64 string
     accountType: str = "partner" # 'vendor' or 'partner'
+
+class DistributorRegistration(BaseModel):
+    fullName: str
+    phone: str
+    address: str
+    nin: str
+    selfie: str
+    category: str
+    product_id: str
+    variant_index: Optional[int] = None
+    quantity: int
+    pin: str
+    client_ref: str = ""
 
 class Product(BaseModel):
     name: str

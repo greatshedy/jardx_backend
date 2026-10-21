@@ -10,7 +10,7 @@ import os
 import secrets
 import json
 import datetime
-from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection, admin_push_subscriptions_collection
+from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection, admin_push_subscriptions_collection, housing_subscriptions_collection, portfolio_collection
 
 logger = logging.getLogger("jardx")
 
@@ -59,6 +59,24 @@ router = APIRouter(
     dependencies=[Depends(verify_admin_token)]
 )
 
+def _safe_json(value, fallback):
+    try:
+        if value in (None, ""):
+            return fallback
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return fallback
+
+
+def _optional_float(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def save_house_image(file: UploadFile):
     file.file.seek(0, os.SEEK_END)
     file_size = file.file.tell()
@@ -91,6 +109,18 @@ async def add_house(
     house_is_promo: bool = Form(False),
     house_promo_type: str = Form(""),
     house_promo_value: float = Form(0.0),
+    land_enabled: bool = Form(True),
+    housing_enabled: bool = Form(False),
+    property_type_prices: str = Form("{}"),
+    housing_unit_types: str = Form("[]"),
+    housing_registration_fee: str = Form(None),
+    housing_savings_multiplier: str = Form(None),
+    promo_visible: bool = Form(True),
+    promo_starts_at: str = Form(""),
+    promo_ends_at: str = Form(""),
+    promo_label: str = Form(""),
+    promo_terms: str = Form(""),
+    promo_applies_to: str = Form("unit_price"),
     images: list[UploadFile] = File(...)
 ):
     try:
@@ -113,6 +143,18 @@ async def add_house(
             "house_is_promo": house_is_promo,
             "house_promo_type": house_promo_type,
             "house_promo_value": house_promo_value,
+            "land_enabled": land_enabled,
+            "housing_enabled": housing_enabled,
+            "property_type_prices": _safe_json(property_type_prices, {}),
+            "housing_unit_types": _safe_json(housing_unit_types, []),
+            "housing_registration_fee": _optional_float(housing_registration_fee),
+            "housing_savings_multiplier": _optional_float(housing_savings_multiplier),
+            "promo_visible": promo_visible,
+            "promo_starts_at": promo_starts_at or "",
+            "promo_ends_at": promo_ends_at or "",
+            "promo_label": promo_label or "",
+            "promo_terms": promo_terms or "",
+            "promo_applies_to": promo_applies_to or "unit_price",
             "house_image": new_image_urls
         }
         
@@ -273,6 +315,18 @@ async def update_house(
     house_is_promo: bool = Form(None),
     house_promo_type: str = Form(None),
     house_promo_value: float = Form(None),
+    land_enabled: bool = Form(None),
+    housing_enabled: bool = Form(None),
+    property_type_prices: str = Form(None),
+    housing_unit_types: str = Form(None),
+    housing_registration_fee: str = Form(None),
+    housing_savings_multiplier: str = Form(None),
+    promo_visible: bool = Form(None),
+    promo_starts_at: str = Form(None),
+    promo_ends_at: str = Form(None),
+    promo_label: str = Form(None),
+    promo_terms: str = Form(None),
+    promo_applies_to: str = Form(None),
     existing_images: str = Form("[]"), # JSON string of existing URLs to keep
     images: list[UploadFile] = File(None)
 ):
@@ -289,6 +343,18 @@ async def update_house(
         if house_is_promo is not None: update_data["house_is_promo"] = house_is_promo
         if house_promo_type is not None: update_data["house_promo_type"] = house_promo_type
         if house_promo_value is not None: update_data["house_promo_value"] = house_promo_value
+        if land_enabled is not None: update_data["land_enabled"] = land_enabled
+        if housing_enabled is not None: update_data["housing_enabled"] = housing_enabled
+        if property_type_prices is not None: update_data["property_type_prices"] = _safe_json(property_type_prices, {})
+        if housing_unit_types is not None: update_data["housing_unit_types"] = _safe_json(housing_unit_types, [])
+        if housing_registration_fee is not None: update_data["housing_registration_fee"] = _optional_float(housing_registration_fee)
+        if housing_savings_multiplier is not None: update_data["housing_savings_multiplier"] = _optional_float(housing_savings_multiplier)
+        if promo_visible is not None: update_data["promo_visible"] = promo_visible
+        if promo_starts_at is not None: update_data["promo_starts_at"] = promo_starts_at
+        if promo_ends_at is not None: update_data["promo_ends_at"] = promo_ends_at
+        if promo_label is not None: update_data["promo_label"] = promo_label
+        if promo_terms is not None: update_data["promo_terms"] = promo_terms
+        if promo_applies_to is not None: update_data["promo_applies_to"] = promo_applies_to
 
         # Handle images
         final_images = json.loads(existing_images)
@@ -912,6 +978,95 @@ async def update_order_status(order_id: str, data: dict):
     except Exception as e:
         return JSONResponse({"message": str(e), "status": 500})
 
+@router.get("/housing-subscriptions")
+async def get_housing_subscriptions(
+    estate_id: str = None,
+    user_id: str = None,
+    subscription_status: str = None,
+    search: str = None,
+):
+    try:
+        subscriptions = list(housing_subscriptions_collection.find({}))
+        if estate_id:
+            subscriptions = [sub for sub in subscriptions if str(sub.get("estate_id")) == str(estate_id)]
+        if user_id:
+            subscriptions = [sub for sub in subscriptions if str(sub.get("user_id")) == str(user_id)]
+        if subscription_status:
+            subscriptions = [sub for sub in subscriptions if sub.get("status") == subscription_status]
+
+        enriched = []
+        for sub in subscriptions:
+            sub["_id"] = str(sub["_id"])
+            user = user_collection.find_one(
+                {"_id": sub.get("user_id")},
+                projection={"user_name": 1, "email": 1, "phone_number": 1},
+            )
+            sub["user_info"] = user or {
+                "user_name": sub.get("user_name", ""),
+                "email": sub.get("user_email", ""),
+                "phone_number": sub.get("user_phone", ""),
+            }
+            house = house_collection.find_one(
+                {"_id": sub.get("estate_id")},
+                projection={"house_name": 1, "house_location": 1},
+            )
+            sub["estate_info"] = house or {
+                "house_name": sub.get("house_name", ""),
+                "house_location": sub.get("house_location", ""),
+            }
+            enriched.append(sub)
+
+        if search:
+            term = search.strip().lower()
+            enriched = [
+                sub for sub in enriched
+                if term in str(sub.get("user_info", {}).get("user_name", "")).lower()
+                or term in str(sub.get("user_info", {}).get("email", "")).lower()
+                or term in str(sub.get("estate_info", {}).get("house_name", "")).lower()
+                or term in str(sub.get("unit_type_name", "")).lower()
+                or term in str(sub.get("subscription_id", "")).lower()
+            ]
+
+        enriched.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        return JSONResponse({
+            "message": "Housing subscriptions fetched",
+            "data": enriched,
+            "status": 200,
+        })
+    except Exception as e:
+        logger.error(f"Error fetching housing subscriptions: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.patch("/housing-subscriptions/{subscription_id}/status")
+async def update_housing_subscription_status(subscription_id: str, payload: dict):
+    try:
+        new_status = (payload or {}).get("status")
+        if new_status not in {"Active", "Suspended", "Completed", "Cancelled"}:
+            return JSONResponse({"message": "Invalid status", "status": 400}, status_code=400)
+        existing = housing_subscriptions_collection.find_one({"_id": subscription_id})
+        if not existing:
+            return JSONResponse({"message": "Subscription not found", "status": 404}, status_code=404)
+        housing_subscriptions_collection.update_one(
+            {"_id": subscription_id},
+            {"$set": {
+                "status": new_status,
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+            }},
+        )
+        plans = list(portfolio_collection.find({"user_id": existing.get("user_id")}))
+        for plan in plans:
+            if plan.get("housing_subscription_id") == subscription_id:
+                portfolio_collection.update_one(
+                    {"_id": plan.get("_id")},
+                    {"$set": {"status": new_status}},
+                )
+        return JSONResponse({"message": "Subscription status updated", "status": 200})
+    except Exception as e:
+        logger.error(f"Error updating housing subscription: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
 @router.post("/bulk-upload-products")
 async def bulk_upload_products(file: UploadFile = File(...)):
     try:
@@ -1204,6 +1359,18 @@ async def update_subscription_settings(payload: dict):
             if not raw or not digits:
                 return JSONResponse({"message": "Support WhatsApp number is required", "status": 400})
             existing["support_whatsapp"] = digits
+
+        if "housing_registration_fee" in payload:
+            fee = _num(payload["housing_registration_fee"], "housing_registration_fee")
+            if fee < 0:
+                return JSONResponse({"message": "Housing registration fee cannot be negative", "status": 400})
+            existing["housing_registration_fee"] = fee
+
+        if "housing_savings_multiplier" in payload:
+            multiplier = _num(payload["housing_savings_multiplier"], "housing_savings_multiplier")
+            if multiplier <= 0:
+                return JSONResponse({"message": "Housing savings multiplier must be greater than 0", "status": 400})
+            existing["housing_savings_multiplier"] = multiplier
 
         sub_settings_collection.replace_one({}, existing, upsert=True)
         return JSONResponse({"message": "Settings updated", "data": existing, "status": 200})
