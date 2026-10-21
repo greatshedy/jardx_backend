@@ -10,7 +10,7 @@ import os
 import secrets
 import json
 import datetime
-from db.database import db, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection, admin_push_subscriptions_collection, housing_subscriptions_collection, portfolio_collection
+from db.database import db, db_aux, house_collection, jard_kidz_collection, user_collection, transactions_collection, products_collection, orders_collection, reviews_collection, sub_settings_collection, vendors_collection, partners_collection, notifications_collection, reports_collection, deletion_requests_collection, admin_push_subscriptions_collection, housing_subscriptions_collection, portfolio_collection
 
 logger = logging.getLogger("jardx")
 
@@ -682,15 +682,257 @@ async def send_warning(payload: dict):
         logger.error(f"Error in /send-warning: {e}")
         return JSONResponse({"message": str(e), "status": 500})
 
-@router.delete("/delete-user/{user_id}")
-async def delete_user(user_id: str):
+def _collect_cloudinary_assets(user, partners, vendors, distributors):
+    urls = set()
+    if user.get("profile_pic"):
+        urls.add(user.get("profile_pic"))
+    for record in list(partners) + list(vendors):
+        for key in ("photo", "certificate"):
+            if record.get(key):
+                urls.add(record.get(key))
+        for image in record.get("gallery") or []:
+            if image:
+                urls.add(image)
+    for record in distributors:
+        if record.get("selfie"):
+            urls.add(record.get("selfie"))
+    return [url for url in urls if url and "cloudinary" in str(url)]
+
+
+def _collect_user_related(user_id, email=""):
+    data = {
+        "portfolio": list(portfolio_collection.find({"user_id": user_id})),
+        "transactions": list(transactions_collection.find({"user_id": user_id})),
+        "orders": list(orders_collection.find({"user_id": user_id})),
+        "reviews": list(reviews_collection.find({"user_id": user_id})),
+        "partners": list(partners_collection.find({"user_id": user_id})),
+        "vendors": list(vendors_collection.find({"user_id": user_id})),
+        "jard_kidz": list(jard_kidz_collection.find({"user_id": user_id})),
+        "notifications": list(notifications_collection.find({"user_id": user_id})),
+        "housing_subscriptions": [
+            item for item in housing_subscriptions_collection.find({})
+            if str(item.get("user_id")) == str(user_id)
+        ],
+        "distributors": [
+            item for item in db.get_collection("distributors").find({})
+            if str(item.get("user_id")) == str(user_id)
+        ],
+    }
+
+    aux_specs = {
+        "deletion_requests": ("deletion_requests", ("user_id",)),
+        "withdraw_requests": ("withdraw_requests", ("user_id",)),
+        "kids_profiles": ("kids_profiles", ("userId",)),
+        "land_purchases": ("land_purchases", ("userId",)),
+        "land_payments": ("land_payments", ("userId",)),
+        "land_referral_relationships": ("land_referral_relationships", ("referrerId", "referredUserId")),
+        "referral_activities": ("referral_activities", ("referrerId", "intermediateReferrerId", "referredUserId")),
+        "referral_commissions": ("referral_commissions", ("referrerId", "intermediateReferrerId", "investorId")),
+        "reports": ("reports", ("reporter_id", "reported_user_id", "user_id", "vendor_id")),
+    }
+    for key, (collection_name, fields) in aux_specs.items():
+        try:
+            collection = db_aux.get_collection(collection_name)
+            docs = list(collection.find({}))
+        except Exception:
+            docs = []
+        data[key] = [
+            doc for doc in docs
+            if any(str(doc.get(field)) == str(user_id) for field in fields)
+        ]
+
+    support_messages = []
+    if email:
+        try:
+            support_collection = db_aux.get_collection("support_messages")
+            support_messages = [
+                doc for doc in support_collection.find({})
+                if str(doc.get("email", "")).lower() == str(email).lower()
+            ]
+        except Exception:
+            support_messages = []
+    data["support_messages"] = support_messages
+
+    all_users = list(user_collection.find({}))
+    data["referred_users"] = [
+        user for user in all_users
+        if str(user.get("referred_by") or "") == str(user_id)
+    ]
+    data["assets"] = _collect_cloudinary_assets(
+        data.get("user") or {},
+        data["partners"],
+        data["vendors"],
+        data["distributors"],
+    )
+    return data
+
+
+def _delete_user_related(user_id, related, delete_requests=True):
+    counts = {}
+    main_collections = {
+        "portfolio": portfolio_collection,
+        "transactions": transactions_collection,
+        "orders": orders_collection,
+        "reviews": reviews_collection,
+        "partners": partners_collection,
+        "vendors": vendors_collection,
+        "jard_kidz": jard_kidz_collection,
+        "notifications": notifications_collection,
+    }
+    for key, collection in main_collections.items():
+        try:
+            collection.delete_many({"user_id": user_id})
+        except Exception as exc:
+            logger.error(f"Delete {key} for user {user_id} failed: {exc}")
+            for doc in related.get(key, []):
+                try:
+                    collection.delete_one({"_id": doc.get("_id")})
+                except Exception as inner_exc:
+                    logger.error(f"Fallback delete {key}/{doc.get('_id')} failed: {inner_exc}")
+        counts[key] = len(related.get(key, []))
+
+    for key in ("housing_subscriptions", "distributors"):
+        collection = (
+            housing_subscriptions_collection
+            if key == "housing_subscriptions"
+            else db.get_collection("distributors")
+        )
+        for doc in related.get(key, []):
+            collection.delete_one({"_id": doc.get("_id")})
+        counts[key] = len(related.get(key, []))
+
+    aux_collections = {
+        "deletion_requests": "deletion_requests",
+        "withdraw_requests": "withdraw_requests",
+        "kids_profiles": "kids_profiles",
+        "land_purchases": "land_purchases",
+        "land_payments": "land_payments",
+        "land_referral_relationships": "land_referral_relationships",
+        "referral_activities": "referral_activities",
+        "referral_commissions": "referral_commissions",
+        "reports": "reports",
+        "support_messages": "support_messages",
+    }
+    for key, collection_name in aux_collections.items():
+        if key == "deletion_requests" and not delete_requests:
+            counts[key] = 0
+            continue
+        try:
+            collection = db_aux.get_collection(collection_name)
+        except Exception:
+            counts[key] = 0
+            continue
+        docs = related.get(key, [])
+        for doc in docs:
+            collection.delete_one({"_id": doc.get("_id")})
+        counts[key] = len(docs)
+
+    referred_cleared = 0
+    for other_user in related.get("referred_users", []):
+        try:
+            user_collection.update_one(
+                {"_id": other_user.get("_id")},
+                {"$unset": {"referred_by": ""}},
+            )
+            referred_cleared += 1
+        except Exception as exc:
+            logger.error(f"Could not clear referral for {other_user.get('_id')}: {exc}")
+    counts["referred_users_cleared"] = referred_cleared
+
+    for asset in related.get("assets", []):
+        try:
+            delete_from_cloudinary(asset)
+        except Exception as exc:
+            logger.error(f"Cloudinary cleanup failed for {asset}: {exc}")
+    counts["cloudinary_assets"] = len(related.get("assets", []))
+    return counts
+
+
+@router.get("/users/{user_id}/deletion-preview")
+async def user_deletion_preview(user_id: str, admin: dict = Depends(verify_admin_token)):
     try:
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404}, status_code=404)
+        related = _collect_user_related(user_id, user.get("email", ""))
+        related["user"] = user
+        related["assets"] = _collect_cloudinary_assets(
+            user,
+            related.get("partners", []),
+            related.get("vendors", []),
+            related.get("distributors", []),
+        )
+        return JSONResponse({
+            "message": "Deletion preview fetched",
+            "status": 200,
+            "data": {
+                "user": {
+                    "_id": user.get("_id"),
+                    "user_name": user.get("user_name", ""),
+                    "email": user.get("email", ""),
+                    "phone_number": user.get("phone_number", ""),
+                    "wallet_balance": float(user.get("wallet_balance", 0) or 0),
+                    "earnings_balance": float(user.get("earnings_balance", 0) or 0),
+                },
+                "confirmation": f"DELETE {user.get('email', '')}",
+                "counts": {
+                    **{key: len(value) for key, value in related.items() if isinstance(value, list) and key not in ("user", "assets")},
+                    "assets": len(related.get("assets", [])),
+                },
+            },
+        })
+    except Exception as e:
+        logger.error(f"Error building deletion preview for {user_id}: {e}")
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
+
+
+@router.delete("/delete-user/{user_id}")
+async def delete_user(user_id: str, payload: dict = None, admin: dict = Depends(verify_admin_token)):
+    try:
+        payload = payload or {}
+        mode = payload.get("mode")
+        confirmation = str(payload.get("confirmation") or "").strip()
+        if mode not in {"user_only", "full"}:
+            return JSONResponse({"message": "Select a valid deletion mode", "status": 400}, status_code=400)
+
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse({"message": "User not found", "status": 404}, status_code=404)
+
+        expected_confirmation = f"DELETE {user.get('email', '')}"
+        if confirmation != expected_confirmation:
+            return JSONResponse({"message": "Confirmation text does not match", "status": 400}, status_code=400)
+
+        if mode == "user_only":
+            user_collection.delete_one({"_id": user_id})
+            logger.info(f"Admin {admin.get('_id') or admin.get('id')} deleted user only: {user_id}")
+            return JSONResponse({
+                "message": "User account deleted. Related records were kept.",
+                "status": 200,
+                "mode": "user_only",
+            })
+
+        related = _collect_user_related(user_id, user.get("email", ""))
+        related["user"] = user
+        asset_urls = _collect_cloudinary_assets(
+            user,
+            related.get("partners", []),
+            related.get("vendors", []),
+            related.get("distributors", []),
+        )
+        related["assets"] = asset_urls
+        counts = _delete_user_related(user_id, related, delete_requests=True)
         user_collection.delete_one({"_id": user_id})
-        logger.info(f"Admin deleted user {user_id}")
-        return JSONResponse({"message": "User deleted successfully", "status": 200})
+        logger.info(f"Admin {admin.get('_id') or admin.get('id')} fully deleted user {user_id} with counts {counts}")
+        return JSONResponse({
+            "message": "User and all related records deleted",
+            "status": 200,
+            "mode": "full",
+            "counts": counts,
+        })
     except Exception as e:
         logger.error(f"Error deleting user {user_id}: {e}")
-        return JSONResponse({"message": str(e), "status": 500})
+        return JSONResponse({"message": str(e), "status": 500}, status_code=500)
 
 # --- ACCOUNT DELETION REQUESTS ---
 
@@ -709,7 +951,7 @@ async def get_deletion_requests():
         return JSONResponse({"message": str(e), "status": 500})
 
 @router.post("/deletion-requests/{request_id}/approve")
-async def approve_deletion_request(request_id: str):
+async def approve_deletion_request(request_id: str, payload: dict = None, admin: dict = Depends(verify_admin_token)):
     try:
         record = deletion_requests_collection.find_one({"id": request_id})
         if not record:
@@ -720,9 +962,26 @@ async def approve_deletion_request(request_id: str):
 
         user_id = str(record.get("user_id") or "")
         deleted = False
+        counts = {}
         if user_id:
-            result = user_collection.delete_one({"_id": user_id})
-            deleted = result.deleted_count > 0
+            user = user_collection.find_one({"_id": user_id})
+            if user:
+                expected = f"DELETE {user.get('email', '')}"
+                if str((payload or {}).get("confirmation") or "").strip() != expected:
+                    return JSONResponse({"message": "Confirmation text does not match", "status": 400})
+                related = _collect_user_related(user_id, user.get("email", ""))
+                related["user"] = user
+                related["assets"] = _collect_cloudinary_assets(
+                    user,
+                    related.get("partners", []),
+                    related.get("vendors", []),
+                    related.get("distributors", []),
+                )
+                counts = _delete_user_related(user_id, related, delete_requests=False)
+                result = user_collection.delete_one({"_id": user_id})
+                deleted = result.deleted_count > 0
+            else:
+                deleted = False
 
         now_iso = datetime.datetime.utcnow().isoformat()
         deletion_requests_collection.update_one(
@@ -732,10 +991,12 @@ async def approve_deletion_request(request_id: str):
                 "processed_at": now_iso,
                 "updated_at": now_iso,
                 "user_deleted": deleted,
+                "deletion_counts": counts,
+                "processed_by": str(admin.get("_id") or admin.get("id") or ""),
             }},
         )
         logger.info(f"Admin APPROVED deletion request {request_id} | user {user_id} deleted={deleted}")
-        return JSONResponse({"message": "Account deleted and request approved", "status": 200, "user_deleted": deleted})
+        return JSONResponse({"message": "Account deleted and request approved", "status": 200, "user_deleted": deleted, "counts": counts})
     except Exception as e:
         logger.error(f"Error approving deletion request {request_id}: {e}")
         return JSONResponse({"message": str(e), "status": 500})

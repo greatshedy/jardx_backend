@@ -15,7 +15,7 @@ logger = logging.getLogger("jardx")
 router = APIRouter(prefix="/users/portfolio", tags=["Portfolio"])
 
 def apply_promo_price(house, price):
-    if promo_is_active(house) and house.get("promo_applies_to") in (None, "", "unit_price", "both"):
+    if promo_is_active(house) and _promo_applies_to(house, "land_unit_price"):
         if house["house_promo_type"] == "percentage":
             discount = float(house.get("house_promo_value", 0))
             return round(price * (1 - discount / 100), 2)
@@ -49,7 +49,13 @@ def promo_is_active(house, now=None):
 
 def _promo_applies_to(house, target):
     applies_to = house.get("promo_applies_to") or "unit_price"
-    return applies_to in (target, "both")
+    if applies_to == "both":
+        return True
+    if target == "land_unit_price":
+        return applies_to in {"land_unit_price", "land_estate", "unit_price"}
+    if target == "housing_unit_price":
+        return applies_to in {"housing_unit_price", "housing_unit", "unit_price"}
+    return applies_to == target
 
 
 def _apply_promo_amount(house, amount, target):
@@ -65,7 +71,7 @@ def _apply_promo_amount(house, amount, target):
     return round(float(amount), 2)
 
 
-def build_promo_snapshot(house, unit_price, registration_fee):
+def build_promo_snapshot(house, unit_price, registration_fee, unit_target="land_unit_price"):
     active = promo_is_active(house)
     snapshot = {
         "promo_id": f"{house.get('_id')}-{house.get('promo_starts_at') or 'always'}",
@@ -78,7 +84,7 @@ def build_promo_snapshot(house, unit_price, registration_fee):
         "starts_at": house.get("promo_starts_at") or "",
         "ends_at": house.get("promo_ends_at") or "",
         "original_unit_price": round(float(unit_price), 2),
-        "locked_unit_price": _apply_promo_amount(house, unit_price, "unit_price"),
+        "locked_unit_price": _apply_promo_amount(house, unit_price, unit_target),
         "original_registration_fee": round(float(registration_fee), 2),
         "locked_registration_fee": _apply_promo_amount(house, registration_fee, "registration_fee"),
         "locked_at": datetime.datetime.utcnow().isoformat(),
@@ -569,7 +575,7 @@ def register_housing(payload: dict, background_tasks: BackgroundTasks, data: dic
         settings = get_settings()
         base_fee = resolve_housing_fee(house, settings)
         multiplier = resolve_housing_multiplier(house, settings)
-        promo_snapshot = build_promo_snapshot(house, unit_price, base_fee)
+        promo_snapshot = build_promo_snapshot(house, unit_price, base_fee, unit_target="housing_unit_price")
         locked_unit_price = promo_snapshot["locked_unit_price"]
         locked_fee = promo_snapshot["locked_registration_fee"]
         if locked_unit_price <= 0:
@@ -936,7 +942,7 @@ def get_housing_dashboard(data: dict = Depends(get_token)):
                     price = 0.0
                 if price <= 0:
                     continue
-                option_promo = build_promo_snapshot(house, price, 0)
+                option_promo = build_promo_snapshot(house, price, 0, unit_target="housing_unit_price")
                 locked_price = option_promo["locked_unit_price"]
                 required_savings = int(math.ceil(locked_price / multiplier))
                 if estate_access >= locked_price:
