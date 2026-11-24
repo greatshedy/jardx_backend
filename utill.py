@@ -6,7 +6,7 @@ import resend
 import secrets
 from jose import JWTError, jwt,ExpiredSignatureError
 from datetime import datetime, timedelta
-from fastapi import status,HTTPException, BackgroundTasks
+from fastapi import status,HTTPException, BackgroundTasks, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends
 import base64
@@ -238,16 +238,24 @@ def decode_access_token(token: str):
         )  # invalid token
     
 
-# This handles "Authorization: Bearer <token>"
-security = HTTPBearer()
+# This handles "Authorization: Bearer <token>" and the web HttpOnly cookie.
+security = HTTPBearer(auto_error=False)
 
-def get_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+WEB_ACCESS_COOKIE = os.getenv("WEB_ACCESS_COOKIE", "jardx_access")
+
+def get_token(
+    request: Request = None,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
     """
-    Extract, decode and validate JWT token
+    Extract, decode and validate a JWT from either the Authorization header
+    (mobile app) or the HttpOnly web session cookie.
     """
 
     try:
-        token = credentials.credentials
+        token = credentials.credentials if credentials else None
+        if not token and request is not None:
+            token = request.cookies.get(WEB_ACCESS_COOKIE)
 
         if not token:
             raise HTTPException(
@@ -1218,15 +1226,31 @@ def send_push_notification_to_user(user_doc: dict, title: str, body: str, data_p
         # Check push token and if push notification setting is enabled
         push_token = user_doc.get("push_token")
         settings = user_doc.get("notification_settings", {})
-        
-        # Guard push-send logic: skip if no token or if the push setting is false
-        if not push_token:
-            return False
-            
+
         if not settings.get("push", False):
             # User has not toggled push notifications on
             return False
-            
+
+        # Browser push (PWA) is independent of the Expo token.
+        web_sent = 0
+        try:
+            from utils.webpush_service import send_user_web_push
+            notification_url = "/notifications"
+            if isinstance(data_payload, dict) and data_payload.get("url"):
+                notification_url = data_payload["url"]
+            web_sent = send_user_web_push(
+                user_doc.get("_id"),
+                title,
+                body,
+                notification_url,
+                tag=notification_url,
+            )
+        except Exception as e:
+            logger.error(f"Browser push failed: {e}")
+
+        if not push_token:
+            return bool(web_sent)
+
         payload = {
             "to": push_token,
             "title": title,
@@ -1250,7 +1274,7 @@ def send_push_notification_to_user(user_doc: dict, title: str, body: str, data_p
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         
         # Return success status
-        return response.status_code == 200
+        return response.status_code == 200 or bool(web_sent)
     except Exception as e:
         print("ERROR sending push notification:", e)
         return False

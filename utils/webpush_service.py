@@ -81,3 +81,87 @@ def send_admin_web_push(title: str, body: str, url: str = "/dashboard", tag: str
     if sent:
         logger.info(f"Admin web push sent to {sent} subscription(s)")
     return sent
+
+
+def send_user_web_push(
+    user_id,
+    title: str,
+    body: str,
+    url: str = "/notifications",
+    tag: str = None,
+    image: str = None,
+) -> int:
+    """Send a web-push notification to every browser subscription for a user."""
+    private_key = os.getenv("VAPID_PRIVATE_KEY")
+    if not private_key or not user_id:
+        return 0
+
+    try:
+        from pywebpush import webpush, WebPushException
+    except Exception as e:
+        logger.error(f"pywebpush unavailable: {e}")
+        return 0
+
+    try:
+        from db.database import user_collection
+    except Exception as e:
+        logger.error(f"user webpush: user collection unavailable: {e}")
+        return 0
+
+    subject = os.getenv("VAPID_SUBJECT", "mailto:jarvadgroup.business@gmail.com")
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "url": url,
+        "tag": tag or url,
+        "icon": image or "/icons/icon-192.png",
+    })
+
+    try:
+        user = user_collection.find_one({"_id": user_id})
+        subscriptions = (user or {}).get("web_push_subscriptions") or []
+    except Exception as e:
+        logger.error(f"user webpush: failed to load subscriptions: {e}")
+        return 0
+
+    sent = 0
+    expired_endpoints = []
+    for s in subscriptions:
+        endpoint = s.get("endpoint")
+        keys = s.get("keys") or {}
+        if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+            continue
+        info = {"endpoint": endpoint, "keys": {"p256dh": keys["p256dh"], "auth": keys["auth"]}}
+        try:
+            webpush(
+                subscription_info=info,
+                data=payload,
+                vapid_private_key=private_key,
+                vapid_claims={"sub": subject},
+            )
+            sent += 1
+        except WebPushException as ex:
+            status = getattr(getattr(ex, "response", None), "status_code", None)
+            if status in (404, 410):
+                expired_endpoints.append(endpoint)
+            else:
+                logger.error(f"user webpush error ({status}): {ex}")
+        except Exception as ex:
+            logger.error(f"user webpush unexpected error: {ex}")
+
+    if expired_endpoints and user is not None:
+        try:
+            remaining = [
+                item for item in subscriptions
+                if item.get("endpoint") not in expired_endpoints
+            ]
+            user_collection.update_one(
+                {"_id": user_id},
+                {"$set": {"web_push_subscriptions": remaining}},
+            )
+        except Exception:
+            pass
+
+    if sent:
+        logger.info(f"User web push sent to {sent} subscription(s) for {user_id}")
+    return sent

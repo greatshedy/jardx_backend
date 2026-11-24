@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, File, Up
 from db.database import user_collection, transactions_collection, notifications_collection
 from utill import get_token, process_referral_logic, send_manual_payment_admin_email
 from utils.payment_gateways.factory import PaymentGatewayFactory
-from utils.webpush_service import send_admin_web_push
+from utils.webpush_service import send_admin_web_push, send_user_web_push
 import secrets
 import datetime
 import calendar
@@ -13,6 +13,33 @@ import logging
 logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/users/payment", tags=["Payment"])
+
+
+def _notify_wallet_credit(user_id, amount, reference):
+    """Best-effort browser push and in-app notification after a credit."""
+    try:
+        notifications_collection.insert_one({
+            "user_id": user_id,
+            "title": "Wallet funded",
+            "body": f"Your wallet has been credited with \u20a6{float(amount):,.2f}.",
+            "type": "PAYMENT",
+            "action_text": "View",
+            "tx_ref": reference,
+            "is_read": False,
+            "created_at": datetime.datetime.utcnow().isoformat(),
+        })
+    except Exception as e:
+        logger.error(f"Credit notification insert failed: {e}")
+    try:
+        send_user_web_push(
+            user_id,
+            "Wallet funded",
+            f"Your wallet has been credited with \u20a6{float(amount):,.2f}.",
+            f"/transactions/{reference}",
+            tag=f"tx-{reference}",
+        )
+    except Exception as e:
+        logger.error(f"Credit web push failed: {e}")
 
 @router.post("/initialize-payment")
 async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
@@ -133,7 +160,8 @@ async def verify_transaction(tx_ref: str, data: dict = Depends(get_token)):
             user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
             
             logger.info(f"Wallet Credited: {user_id} | Ref: {tx_ref} | Old: {old_balance} | New: {new_balance}")
-            
+            _notify_wallet_credit(user_id, transaction["amount"], tx_ref)
+
             # Process Referral Activation & Bonus
             process_referral_logic(user_id, float(transaction["amount"]), user_collection, transactions_collection)
             
@@ -200,7 +228,8 @@ async def handle_payment_webhook(provider: str, request: Request):
                 user = user_collection.find_one({"_id": user_id})
                 new_balance = float(user.get("wallet_balance", 0)) + float(transaction["amount"])
                 user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_balance}})
-                
+                _notify_wallet_credit(user_id, transaction["amount"], ref)
+
                 # Process Referral Activation & Bonus
                 process_referral_logic(user_id, float(transaction["amount"]), user_collection, transactions_collection)
                 
@@ -396,6 +425,7 @@ async def payment_callback(
                             user = user_collection.find_one({"_id": user_id})
                             new_bal = float(user.get("wallet_balance", 0)) + float(tx_latest["amount"])
                             user_collection.update_one({"_id": user_id}, {"$set": {"wallet_balance": new_bal}})
+                            _notify_wallet_credit(user_id, tx_latest["amount"], ref)
                             process_referral_logic(user_id, float(tx_latest["amount"]), user_collection, transactions_collection)
                             is_successful = True
                             logger.info(f"Callback: Successfully active-verified and credited {ref}")

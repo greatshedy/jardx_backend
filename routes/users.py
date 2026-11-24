@@ -1,8 +1,10 @@
 from fastapi import APIRouter,Depends,HTTPException,status,BackgroundTasks, Request, UploadFile, File
 from db.database import user_collection, house_collection, transactions_collection, jard_kidz_collection, vendors_collection, partners_collection, notifications_collection, sub_settings_collection, reports_collection, reviews_collection, withdraw_requests_collection, deletion_requests_collection
 import datetime
+import hashlib
+import json
 import secrets
-from utill import hashedpassword,VerifyHashed,create_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary, send_account_deletion_request_email
+from utill import hashedpassword,VerifyHashed,create_access_token,decode_access_token,get_token,process_base85_image,reassemble_base64_string, send_jard_kidz_email, send_wallet_credit_email, get_image_url, upload_to_cloudinary, delete_from_cloudinary, send_account_deletion_request_email, WEB_ACCESS_COOKIE
 
 from fastapi.responses import JSONResponse, Response
 from utill import generate_otp,get_token,send_email
@@ -31,6 +33,124 @@ PARTNER_FEE_PURPOSES = ("Partner Registration Fee", "Partner Subscription Renewa
 
 # Default support WhatsApp number, overridable from the admin dashboard.
 SUPPORT_WHATSAPP_DEFAULT = "2347085579245"
+
+# --- Web session configuration (HttpOnly cookie auth for the PWA) ---
+WEB_REFRESH_COOKIE = os.getenv("WEB_REFRESH_COOKIE", "jardx_refresh")
+WEB_ACCESS_MINUTES = int(os.getenv("WEB_ACCESS_EXPIRE_MINUTES", "60"))
+WEB_REFRESH_DAYS = int(os.getenv("WEB_REFRESH_EXPIRE_DAYS", "30"))
+WEB_COOKIE_SECURE = os.getenv("WEB_COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes")
+WEB_COOKIE_SAMESITE = os.getenv("WEB_COOKIE_SAMESITE", "lax")
+WEB_COOKIE_DOMAIN = os.getenv("WEB_COOKIE_DOMAIN", "").strip() or None
+
+
+def _hash_web_token(value: str) -> str:
+    return hashlib.sha256((value + os.getenv("JWT_SECRET_KEY", "")).encode()).hexdigest()
+
+
+def _sanitize_web_user(user: dict) -> dict:
+    return {
+        "_id": str(user.get("_id", "")),
+        "user_name": user.get("user_name", ""),
+        "email": user.get("email", ""),
+        "phone_number": user.get("phone_number", ""),
+        "profile_pic": user.get("profile_pic", ""),
+        "wallet_balance": float(user.get("wallet_balance", 0) or 0),
+        "has_pin": bool(user.get("transaction_pin")),
+        "partner_type": user.get("partner_type", ""),
+        "is_partner": bool(user.get("is_partner")),
+        "referral_code": user.get("referral_code", ""),
+        "housing_registration_paid": bool(user.get("housing_registration_paid")),
+    }
+
+
+def _set_web_cookies(response: Response, access_token: str, refresh_token: str):
+    kwargs = {
+        "httponly": True,
+        "secure": WEB_COOKIE_SECURE,
+        "samesite": WEB_COOKIE_SAMESITE,
+        "path": "/",
+        "domain": WEB_COOKIE_DOMAIN,
+    }
+    response.set_cookie(
+        WEB_ACCESS_COOKIE,
+        access_token,
+        max_age=WEB_ACCESS_MINUTES * 60,
+        **kwargs,
+    )
+    response.set_cookie(
+        WEB_REFRESH_COOKIE,
+        refresh_token,
+        max_age=WEB_REFRESH_DAYS * 24 * 60 * 60,
+        **kwargs,
+    )
+
+
+def _clear_web_cookies(response: Response):
+    response.delete_cookie(WEB_ACCESS_COOKIE, path="/", domain=WEB_COOKIE_DOMAIN)
+    response.delete_cookie(WEB_REFRESH_COOKIE, path="/", domain=WEB_COOKIE_DOMAIN)
+
+
+def _issue_web_session(user: dict, request: Request, message: str = "Login Successful"):
+    user_id = user.get("_id")
+    access_token = create_access_token({"id": user_id}, expires_delta=WEB_ACCESS_MINUTES)
+    refresh_token = f"{user_id}.{secrets.token_urlsafe(32)}"
+    now = datetime.datetime.utcnow()
+    expires_at = (now + datetime.timedelta(days=WEB_REFRESH_DAYS)).isoformat()
+
+    try:
+        fresh_user = user_collection.find_one({"_id": user_id}) or user
+        sessions = []
+        for session in fresh_user.get("web_sessions", []) or []:
+            try:
+                if datetime.datetime.fromisoformat(session.get("expires_at", "")) > now:
+                    sessions.append(session)
+            except Exception:
+                continue
+        sessions.append({
+            "token_hash": _hash_web_token(refresh_token),
+            "created_at": now.isoformat(),
+            "expires_at": expires_at,
+            "last_used_at": now.isoformat(),
+            "user_agent": request.headers.get("user-agent", "")[:500] if request else "",
+            "ip": (request.client.host if request and request.client else ""),
+        })
+        sessions = sessions[-5:]
+        user_collection.update_one({"_id": user_id}, {"$set": {"web_sessions": sessions}})
+    except Exception as e:
+        logger.error(f"Could not persist web session: {e}")
+
+    response = JSONResponse({
+        "status": 200,
+        "message": message,
+        "user": _sanitize_web_user(user),
+    })
+    _set_web_cookies(response, access_token, refresh_token)
+    return response
+
+
+def _get_web_refresh_record(request: Request):
+    token = request.cookies.get(WEB_REFRESH_COOKIE) if request else None
+    if not token or "." not in token:
+        return None, None
+    user_id = token.split(".", 1)[0]
+    try:
+        user = user_collection.find_one({"_id": user_id})
+    except Exception as e:
+        logger.error(f"Could not read web session user: {e}")
+        return None, None
+    if not user:
+        return None, None
+    token_hash = _hash_web_token(token)
+    record = next(
+        (session for session in (user.get("web_sessions") or []) if session.get("token_hash") == token_hash),
+        None,
+    )
+    if not record:
+        return None, None
+    record = dict(record)
+    record["user_id"] = user_id
+    record["user"] = user
+    return token, record
 
 
 def _resolve_locked_fee(record, default_fee, purposes):
@@ -1410,6 +1530,225 @@ async def google_auth(payload: GoogleAuth):
             "message": f"Internal server error: {e}",
             "status": status.HTTP_500_INTERNAL_SERVER_ERROR
         })
+
+
+# --- WEB AUTHENTICATION (HttpOnly cookie sessions for the PWA) ---
+
+@router.post("/web/login")
+async def web_login(payload: dict, request: Request):
+    """Password or OTP login that issues HttpOnly cookies instead of a bearer token."""
+    try:
+        email = str((payload or {}).get("email", "")).strip()
+        password = str((payload or {}).get("password", "") or "")
+        otp = str((payload or {}).get("otp", "") or "")
+
+        if not email:
+            return JSONResponse(status_code=400, content={"status": 400, "message": "Email is required"})
+
+        user = user_collection.find_one({"email": email})
+        if not user:
+            return JSONResponse(status_code=401, content={"status": 401, "message": "User does not exist"})
+
+        authenticated = False
+        if password:
+            try:
+                authenticated = bool(VerifyHashed(user.get("password", ""), password))
+            except Exception:
+                authenticated = False
+        elif otp:
+            expiry = user.get("otp_expiry")
+            now_ts = int(time.time())
+            if expiry and isinstance(expiry, (int, float)) and now_ts > expiry:
+                return JSONResponse(status_code=401, content={"status": 401, "message": "OTP has expired"})
+            authenticated = str(otp) == str(user.get("otp", ""))
+        else:
+            return JSONResponse(status_code=400, content={"status": 400, "message": "Password or OTP is required"})
+
+        if not authenticated:
+            return JSONResponse(status_code=401, content={"status": 401, "message": "Incorrect credentials"})
+
+        user_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"otp": "", "otp_resend_count": 0, "otp_block_until": None}},
+        )
+        return _issue_web_session(user, request, "Login Successful")
+    except Exception as e:
+        logger.error(f"Error in /users/web/login: {e}")
+        return JSONResponse(status_code=500, content={"status": 500, "message": "Login failed"})
+
+
+@router.post("/web/google-auth")
+async def web_google_auth(payload: dict, request: Request):
+    """Google sign-in for browsers, returning an HttpOnly session."""
+    try:
+        google_payload = GoogleAuth(
+            idToken=(payload or {}).get("idToken", ""),
+            platform="web",
+            referred_by=(payload or {}).get("referred_by", "") or "",
+        )
+        result = await google_auth(google_payload)
+        body = json.loads(result.body.decode()) if getattr(result, "body", None) else {}
+        if int(body.get("status", 500)) != 200:
+            return JSONResponse(status_code=401, content=body)
+
+        email = (body.get("user") or {}).get("email", "")
+        user = user_collection.find_one({"email": email})
+        if not user:
+            return JSONResponse(status_code=401, content={"status": 401, "message": "Google account not found"})
+        return _issue_web_session(user, request, body.get("message", "Login Successful"))
+    except Exception as e:
+        logger.error(f"Error in /users/web/google-auth: {e}")
+        return JSONResponse(status_code=500, content={"status": 500, "message": "Google sign-in failed"})
+
+
+@router.get("/web/session")
+async def web_session(data: dict = Depends(get_token)):
+    """Return the current user from the HttpOnly access cookie."""
+    try:
+        user_id = data.get("id") if data else None
+        if not user_id:
+            return JSONResponse(status_code=401, content={"status": 401, "message": "Not authenticated"})
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse(status_code=401, content={"status": 401, "message": "User not found"})
+        return JSONResponse({"status": 200, "user": _sanitize_web_user(user)})
+    except Exception as e:
+        logger.error(f"Error in /users/web/session: {e}")
+        return JSONResponse(status_code=401, content={"status": 401, "message": "Not authenticated"})
+
+
+@router.post("/web/refresh")
+async def web_refresh(request: Request):
+    """Rotate the refresh cookie and issue a fresh short-lived access cookie."""
+    token, record = _get_web_refresh_record(request)
+    if not token or not record:
+        response = JSONResponse(status_code=401, content={"status": 401, "message": "Session expired"})
+        _clear_web_cookies(response)
+        return response
+
+    user = record.get("user") or {}
+    user_id = record.get("user_id")
+    try:
+        expires_at = datetime.datetime.fromisoformat(record.get("expires_at"))
+        if datetime.datetime.utcnow() > expires_at:
+            raise ValueError("expired")
+    except Exception:
+        sessions = [
+            session for session in (user.get("web_sessions") or [])
+            if session.get("token_hash") != _hash_web_token(token)
+        ]
+        try:
+            user_collection.update_one({"_id": user_id}, {"$set": {"web_sessions": sessions}})
+        except Exception:
+            pass
+        response = JSONResponse(status_code=401, content={"status": 401, "message": "Session expired"})
+        _clear_web_cookies(response)
+        return response
+
+    old_hash = _hash_web_token(token)
+    now = datetime.datetime.utcnow()
+    sessions = []
+    for session in (user.get("web_sessions") or []):
+        if session.get("token_hash") == old_hash:
+            continue
+        try:
+            if datetime.datetime.fromisoformat(session.get("expires_at", "")) > now:
+                sessions.append(session)
+        except Exception:
+            continue
+    try:
+        user_collection.update_one({"_id": user_id}, {"$set": {"web_sessions": sessions}})
+    except Exception as e:
+        logger.error(f"Error rotating web session: {e}")
+    return _issue_web_session(user, request, "Session refreshed")
+
+
+@router.post("/web/logout")
+async def web_logout(request: Request):
+    """Revoke the refresh session and clear both auth cookies."""
+    token, record = _get_web_refresh_record(request)
+    if token and record:
+        try:
+            user = record.get("user") or {}
+            old_hash = _hash_web_token(token)
+            sessions = [
+                session for session in (user.get("web_sessions") or [])
+                if session.get("token_hash") != old_hash
+            ]
+            user_collection.update_one({"_id": record.get("user_id")}, {"$set": {"web_sessions": sessions}})
+        except Exception as e:
+            logger.error(f"Error revoking web session: {e}")
+    response = JSONResponse({"status": 200, "message": "Logged out"})
+    _clear_web_cookies(response)
+    return response
+
+
+# --- USER WEB PUSH (browser subscriptions) ---
+
+@router.get("/push/public-key")
+async def user_push_public_key(data: dict = Depends(get_token)):
+    return JSONResponse({
+        "status": 200,
+        "publicKey": os.getenv("VAPID_PUBLIC_KEY", ""),
+    })
+
+
+@router.post("/push/subscribe")
+async def user_push_subscribe(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        sub = (payload or {}).get("subscription") or (payload or {})
+        endpoint = sub.get("endpoint")
+        keys = sub.get("keys") or {}
+        if not endpoint or not keys.get("p256dh") or not keys.get("auth"):
+            return JSONResponse(status_code=400, content={"status": 400, "message": "Invalid push subscription"})
+
+        user = user_collection.find_one({"_id": user_id})
+        if not user:
+            return JSONResponse(status_code=404, content={"status": 404, "message": "User not found"})
+
+        now = datetime.datetime.utcnow().isoformat()
+        doc = {
+            "endpoint": endpoint,
+            "keys": {"p256dh": keys.get("p256dh"), "auth": keys.get("auth")},
+            "user_agent": (payload or {}).get("user_agent", "")[:500],
+            "updated_at": now,
+        }
+        subscriptions = [
+            item for item in (user.get("web_push_subscriptions") or [])
+            if item.get("endpoint") != endpoint
+        ]
+        subscriptions.append(doc)
+        subscriptions = subscriptions[-10:]
+        user_collection.update_one(
+            {"_id": user_id},
+            {"$set": {"web_push_subscriptions": subscriptions}},
+        )
+        return JSONResponse({"status": 200, "message": "Subscribed"})
+    except Exception as e:
+        logger.error(f"Error in /users/push/subscribe: {e}")
+        return JSONResponse(status_code=500, content={"status": 500, "message": str(e)})
+
+
+@router.post("/push/unsubscribe")
+async def user_push_unsubscribe(payload: dict, data: dict = Depends(get_token)):
+    try:
+        user_id = data.get("id")
+        endpoint = (payload or {}).get("endpoint")
+        if endpoint:
+            user = user_collection.find_one({"_id": user_id}) or {}
+            subscriptions = [
+                item for item in (user.get("web_push_subscriptions") or [])
+                if item.get("endpoint") != endpoint
+            ]
+            user_collection.update_one(
+                {"_id": user_id},
+                {"$set": {"web_push_subscriptions": subscriptions}},
+            )
+        return JSONResponse({"status": 200, "message": "Unsubscribed"})
+    except Exception as e:
+        logger.error(f"Error in /users/push/unsubscribe: {e}")
+        return JSONResponse(status_code=500, content={"status": 500, "message": str(e)})
 
 
 #Returning user
