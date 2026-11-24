@@ -117,6 +117,139 @@ if "housing_subscriptions" not in existing_collections:
 else:
     housing_subscriptions_collection = db.get_collection("housing_subscriptions")
 
+# --- Jard Block collections (aux keyspace, intentionally unindexed) ---
+_aux_collections = db_aux.list_collection_names()
+if "block_plans" not in _aux_collections:
+    try:
+        block_plans_collection = db_aux.create_collection("block_plans", definition=unindexed_definition)
+    except Exception as e:
+        print(f"Error creating block_plans collection: {e}")
+        block_plans_collection = db_aux.get_collection("block_plans")
+else:
+    block_plans_collection = db_aux.get_collection("block_plans")
+
+if "block_investments" not in _aux_collections:
+    try:
+        block_investments_collection = db_aux.create_collection("block_investments", definition=unindexed_definition)
+    except Exception as e:
+        print(f"Error creating block_investments collection: {e}")
+        block_investments_collection = db_aux.get_collection("block_investments")
+else:
+    block_investments_collection = db_aux.get_collection("block_investments")
+
+if "block_referrals" not in _aux_collections:
+    try:
+        block_referrals_collection = db_aux.create_collection("block_referrals", definition=unindexed_definition)
+    except Exception as e:
+        print(f"Error creating block_referrals collection: {e}")
+        block_referrals_collection = db_aux.get_collection("block_referrals")
+else:
+    block_referrals_collection = db_aux.get_collection("block_referrals")
+
+if "block_settings" not in _aux_collections:
+    try:
+        block_settings_collection = db_aux.create_collection("block_settings", definition=unindexed_definition)
+    except Exception as e:
+        print(f"Error creating block_settings collection: {e}")
+        block_settings_collection = db_aux.get_collection("block_settings")
+else:
+    block_settings_collection = db_aux.get_collection("block_settings")
+
+
+def _seed_block_defaults():
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    try:
+        existing = list(block_plans_collection.find({}))
+    except Exception as e:
+        print(f"Block plan seed skipped: {e}")
+        return
+    if not existing:
+        defaults = [
+            {
+                "slug": "bronze",
+                "name": "Bronze",
+                "description": "The accessible entry point into Jard Block with steady monthly returns.",
+                "unit_price": 5000.0,
+                "units_per_slot": 1,
+                "annual_roi": 12.0,
+                "moratorium_months": 4,
+                "payout_months": 12,
+                "principal_return": True,
+                "referral_rate": 0.01,
+                "unlimited_slots": True,
+                "total_slots": None,
+                "active": True,
+                "order": 1,
+                "color": "#CD7F32",
+                "benefits": ["12% annual ROI", "4-month moratorium", "12 monthly payouts", "Principal returned at maturity"],
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "slug": "silver",
+                "name": "Silver",
+                "description": "A balanced plan with stronger returns for growing portfolios.",
+                "unit_price": 25000.0,
+                "units_per_slot": 10,
+                "annual_roi": 24.0,
+                "moratorium_months": 4,
+                "payout_months": 12,
+                "principal_return": True,
+                "referral_rate": 0.0,
+                "unlimited_slots": True,
+                "total_slots": None,
+                "active": True,
+                "order": 2,
+                "color": "#9CA3AF",
+                "benefits": ["24% annual ROI", "4-month moratorium", "12 monthly payouts", "Principal returned at maturity"],
+                "created_at": now,
+                "updated_at": now,
+            },
+            {
+                "slug": "platinum",
+                "name": "Platinum",
+                "description": "The premium Jard Block tier for high-value investors.",
+                "unit_price": 50000.0,
+                "units_per_slot": 100,
+                "annual_roi": 36.0,
+                "moratorium_months": 4,
+                "payout_months": 12,
+                "principal_return": True,
+                "referral_rate": 0.025,
+                "unlimited_slots": True,
+                "total_slots": None,
+                "active": True,
+                "order": 3,
+                "color": "#F59E0B",
+                "benefits": ["36% annual ROI", "4-month moratorium", "12 monthly payouts", "Principal returned at maturity"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        ]
+        for plan in defaults:
+            try:
+                block_plans_collection.insert_one(plan)
+            except Exception as e:
+                print(f"Block plan seed insert failed: {e}")
+    try:
+        if not list(block_settings_collection.find({})):
+            block_settings_collection.insert_one({
+                "_id": "global",
+                "bank_name": "GTBank",
+                "account_name": "Jarvad Supplying In'l",
+                "account_number": "0106896517",
+                "transfer_instructions": "Transfer the exact investment amount to the account above, then upload your proof of payment. Use your full name as the transfer narration.",
+                "disclaimer": "Jard Block is an investment product. Returns are projections based on the selected plan and are subject to the terms of your investment. Only invest funds you can commit for the full term.",
+                "support_whatsapp": "2347085579245",
+                "updated_at": now,
+            })
+    except Exception as e:
+        print(f"Block settings seed skipped: {e}")
+
+
+_seed_block_defaults()
+
 if "reports" not in db_aux.list_collection_names():
     try:
         reports_collection = db_aux.create_collection("reports")

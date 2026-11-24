@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-from routes import users, admin, payment, finance, portfolio, jardproc, withdraw
+from routes import users, admin, payment, finance, portfolio, jardproc, withdraw, block
 from routes.test_runner.routes import router as test_runner_router
 from routes.db_tool import router as db_tool_router
 
@@ -132,6 +132,8 @@ app.include_router(finance.router)
 app.include_router(portfolio.router)
 app.include_router(jardproc.router)
 app.include_router(withdraw.router)
+app.include_router(block.user_router)
+app.include_router(block.admin_router)
 app.include_router(test_runner_router)
 app.include_router(db_tool_router)
 
