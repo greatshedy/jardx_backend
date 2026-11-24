@@ -77,6 +77,40 @@ def _optional_float(value):
         return None
 
 
+def _normalize_pricing_plans(plans):
+    """Normalize pricing plan numbers and derive per-plan discount metadata."""
+    normalized = []
+    if not isinstance(plans, list):
+        return normalized
+    for raw in plans:
+        if not isinstance(raw, dict):
+            continue
+        plan = dict(raw)
+        sale_price = _optional_float(plan.get("outrightPrice"))
+        if sale_price is None:
+            sale_price = _optional_float(plan.get("price"))
+        sale_price = max(0.0, sale_price or 0.0)
+        original_price = _optional_float(plan.get("originalPrice"))
+        if original_price is not None:
+            original_price = max(0.0, original_price)
+        # An original price only creates a discount when it is above the sale price.
+        if original_price is None or original_price <= sale_price:
+            original_price = None
+        plan["outrightPrice"] = sale_price
+        plan["originalPrice"] = original_price
+        if original_price and original_price > sale_price:
+            plan["discountAmount"] = round(original_price - sale_price, 2)
+            plan["discountPercent"] = int(round((1 - (sale_price / original_price)) * 100))
+        else:
+            plan["discountAmount"] = 0.0
+            plan["discountPercent"] = 0
+        for key in ("percentageIncrease", "downPayment"):
+            value = _optional_float(plan.get(key))
+            plan[key] = value if value is not None else plan.get(key)
+        normalized.append(plan)
+    return normalized
+
+
 def save_house_image(file: UploadFile):
     file.file.seek(0, os.SEEK_END)
     file_size = file.file.tell()
@@ -136,7 +170,7 @@ async def add_house(
             "house_about": house_about,
             "house_location": house_location,
             "house_status": house_status,
-            "house_pricing_plan": json.loads(house_pricing_plan),
+            "house_pricing_plan": _normalize_pricing_plans(json.loads(house_pricing_plan)),
             "house_landmarks": json.loads(house_landmarks),
             "house_benefits": json.loads(house_benefits),
             "house_type": house_type,
@@ -238,7 +272,7 @@ async def bulk_add_houses(payload: dict):
                     "house_type": house_data.get("house_type", ""),
                     "house_landmarks": landmarks,
                     "house_benefits": benefits,
-                    "house_pricing_plan": pricing,
+                    "house_pricing_plan": _normalize_pricing_plans(pricing),
                     "house_image": [],
                     "house_is_promo": house_data.get("house_is_promo", False),
                     "house_promo_type": house_data.get("house_promo_type", ""),
@@ -336,7 +370,7 @@ async def update_house(
         if house_about: update_data["house_about"] = house_about
         if house_location: update_data["house_location"] = house_location
         if house_status: update_data["house_status"] = house_status
-        if house_pricing_plan: update_data["house_pricing_plan"] = json.loads(house_pricing_plan)
+        if house_pricing_plan: update_data["house_pricing_plan"] = _normalize_pricing_plans(json.loads(house_pricing_plan))
         if house_landmarks: update_data["house_landmarks"] = json.loads(house_landmarks)
         if house_benefits: update_data["house_benefits"] = json.loads(house_benefits)
         if house_type is not None: update_data["house_type"] = house_type

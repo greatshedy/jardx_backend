@@ -14,7 +14,29 @@ logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/users/portfolio", tags=["Portfolio"])
 
-def apply_promo_price(house, price):
+def resolve_plan_pricing(plan):
+    """Return (original_price, sale_price, discount_percent, has_plan_discount)."""
+    if not isinstance(plan, dict):
+        return None, 0.0, 0, False
+    try:
+        sale_price = float(plan.get("outrightPrice") or plan.get("price") or 0)
+    except (TypeError, ValueError):
+        sale_price = 0.0
+    try:
+        original_price = float(plan.get("originalPrice") or 0)
+    except (TypeError, ValueError):
+        original_price = 0.0
+    if original_price <= sale_price or sale_price <= 0:
+        return None, sale_price, 0, False
+    discount_percent = int(round((1 - (sale_price / original_price)) * 100))
+    return original_price, sale_price, discount_percent, True
+
+
+def apply_promo_price(house, price, plan=None):
+    # A per-plan original/sale price takes precedence over the estate promo.
+    _, _, _, has_plan_discount = resolve_plan_pricing(plan) if plan is not None else (None, 0, 0, False)
+    if has_plan_discount:
+        return round(float(price), 2)
     if promo_is_active(house) and _promo_applies_to(house, "land_unit_price"):
         if house["house_promo_type"] == "percentage":
             discount = float(house.get("house_promo_value", 0))
@@ -117,6 +139,15 @@ def _infer_plan_property_type(plan):
     return explicit
 
 
+def get_property_type_plan(house, property_type):
+    key = normalize_property_type(property_type)
+    plans = house.get("house_pricing_plan") or []
+    for plan in plans:
+        if _infer_plan_property_type(plan) == key:
+            return plan
+    return None
+
+
 def get_property_type_price(house, property_type):
     key = normalize_property_type(property_type)
     plans = house.get("house_pricing_plan") or []
@@ -215,9 +246,10 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
 
         # Process Outright vs Installment
         if purchase.plan_type == "outright":
-            # outright purchase uses the price
-            outright_price = apply_promo_price(house, float(house_plan["outrightPrice"]))
-            
+            # outright purchase uses the plan sale price; plan discount wins over house promo.
+            original_price, sale_price, discount_percent, plan_has_discount = resolve_plan_pricing(house_plan)
+            outright_price = apply_promo_price(house, float(house_plan.get("outrightPrice") or house_plan.get("price") or 0), house_plan)
+
             # create portfolio logic
             portfolio_item = {
                 "user_id": user_id,
@@ -225,6 +257,9 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "house_name": house["house_name"],
                 "plan_type": purchase.plan_type,
                 "total_price": outright_price,
+                "original_price": original_price or outright_price,
+                "plan_sale_price": outright_price,
+                "discount_percent": discount_percent,
                 "amount_paid": purchase.amount_to_pay,
                 "remaining_balance": 0.0,
                 "monthly_payment": 0.0,
@@ -254,7 +289,8 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
 
             num_months = int(installments[purchase.plan_index])
             percentage_increase = float(house_plan["percentageIncrease"])
-            outright_price = apply_promo_price(house, float(house_plan["outrightPrice"]))
+            original_price, sale_price, discount_percent, plan_has_discount = resolve_plan_pricing(house_plan)
+            outright_price = apply_promo_price(house, float(house_plan.get("outrightPrice") or house_plan.get("price") or 0), house_plan)
             down_payment_perc = float(house_plan["downPayment"])
 
             total_percentage_increase = (percentage_increase / 100) * (purchase.plan_index + 1)
@@ -272,6 +308,9 @@ def buy_property(purchase: PropertyPurchase, background_tasks: BackgroundTasks, 
                 "house_name": house["house_name"],
                 "plan_type": purchase.plan_type,
                 "total_price": total_payment,
+                "original_price": original_price or outright_price,
+                "plan_sale_price": outright_price,
+                "discount_percent": discount_percent,
                 "amount_paid": purchase.amount_to_pay,
                 "remaining_balance": remaining_balance,
                 "monthly_payment": monthly_payment,
@@ -392,8 +431,14 @@ def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks,
         if market_mode == "land_estate" and house.get("land_enabled") is False:
             return JSONResponse(status_code=400, content={"message": "Land/Estate plans are not available for this estate"})
 
+        plan_original_price = None
+        plan_discount_percent = 0
+        plan_sale_price = target_amount
+        plan_has_discount = False
         if market_mode == "land_estate" and property_type:
-            priced_target = get_property_type_price(house, property_type)
+            selected_plan = get_property_type_plan(house, property_type)
+            plan_original_price, plan_sale_price, plan_discount_percent, plan_has_discount = resolve_plan_pricing(selected_plan)
+            priced_target = plan_sale_price or get_property_type_price(house, property_type)
             if priced_target <= 0:
                 return JSONResponse(status_code=400, content={
                     "message": "No pricing plan is configured for the selected property type"
@@ -403,10 +448,17 @@ def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks,
                 apartment_type = property_type
 
         promo_snapshot = None
-        if property_type and promo_is_active(house):
+        if property_type and promo_is_active(house) and not plan_has_discount:
             snapshot = build_promo_snapshot(house, target_amount, 0)
             target_amount = snapshot["locked_unit_price"]
             promo_snapshot = snapshot
+        elif plan_has_discount:
+            promo_snapshot = {
+                "is_plan_discount": True,
+                "original_unit_price": round(float(plan_original_price or target_amount), 2),
+                "locked_unit_price": round(float(target_amount), 2),
+                "discount_percent": plan_discount_percent,
+            }
 
         if target_amount <= 0 or duration <= 0:
             return JSONResponse(status_code=400, content={"message": "Invalid target amount or duration"})
@@ -441,6 +493,9 @@ def create_jardhouz_saving(saving_data: dict, background_tasks: BackgroundTasks,
             "unit_type": apartment_type,
             "plan_type": "JardHouz Saving",
             "total_price": target_amount,
+            "original_price": plan_original_price or target_amount,
+            "plan_sale_price": target_amount,
+            "discount_percent": plan_discount_percent,
             "amount_paid": first_payment,
             "remaining_balance": max(0, target_amount - first_payment),
             "duration_months": duration,
