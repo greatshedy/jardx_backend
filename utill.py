@@ -222,7 +222,7 @@ def decode_access_token(token: str):
         return payload  # ✅ valid token
 
     except ExpiredSignatureError:
-        print("❌ Token expired")
+        print("Token expired")
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -230,7 +230,7 @@ def decode_access_token(token: str):
         )
 
     except JWTError:
-        print("❌ Invalid token")
+        print("Invalid token")
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -271,7 +271,7 @@ def get_token(
         return payload  # 👈 return decoded data instead of raw token
 
     except Exception as e:
-        print("❌ Unexpected Error:", str(e))
+        print("Unexpected Error:", str(e))
 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

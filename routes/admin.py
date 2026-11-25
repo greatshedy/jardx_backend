@@ -3,10 +3,18 @@ from typing import List
 from model import House, JardKidzPlan
 from fastapi.responses import JSONResponse, FileResponse
 from starlette import status
-from utill import get_token, chunk_base64_string, reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary
+from utill import get_token, chunk_base64_string, reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary, hashedpassword
+from utils.house_service import (
+    optional_float as _optional_float,
+    normalize_pricing_plans as _normalize_pricing_plans,
+    safe_json as _safe_json,
+    save_house_image,
+)
+from utils.product_service import save_product_image
 
 import logging
 import os
+import re
 import secrets
 import json
 import datetime
@@ -58,77 +66,6 @@ router = APIRouter(
     tags=["Admin"],
     dependencies=[Depends(verify_admin_token)]
 )
-
-def _safe_json(value, fallback):
-    try:
-        if value in (None, ""):
-            return fallback
-        return json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return fallback
-
-
-def _optional_float(value):
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_pricing_plans(plans):
-    """Normalize pricing plan numbers and derive per-plan discount metadata."""
-    normalized = []
-    if not isinstance(plans, list):
-        return normalized
-    for raw in plans:
-        if not isinstance(raw, dict):
-            continue
-        plan = dict(raw)
-        sale_price = _optional_float(plan.get("outrightPrice"))
-        if sale_price is None:
-            sale_price = _optional_float(plan.get("price"))
-        sale_price = max(0.0, sale_price or 0.0)
-        original_price = _optional_float(plan.get("originalPrice"))
-        if original_price is not None:
-            original_price = max(0.0, original_price)
-        # An original price only creates a discount when it is above the sale price.
-        if original_price is None or original_price <= sale_price:
-            original_price = None
-        plan["outrightPrice"] = sale_price
-        plan["originalPrice"] = original_price
-        if original_price and original_price > sale_price:
-            plan["discountAmount"] = round(original_price - sale_price, 2)
-            plan["discountPercent"] = int(round((1 - (sale_price / original_price)) * 100))
-        else:
-            plan["discountAmount"] = 0.0
-            plan["discountPercent"] = 0
-        for key in ("percentageIncrease", "downPayment"):
-            value = _optional_float(plan.get(key))
-            plan[key] = value if value is not None else plan.get(key)
-        normalized.append(plan)
-    return normalized
-
-
-def save_house_image(file: UploadFile):
-    file.file.seek(0, os.SEEK_END)
-    file_size = file.file.tell()
-    file.file.seek(0)
-    
-    if file_size > 1024 * 1024: # Allowing up to 1MB now since Cloudinary handles it well
-        return None, "File size exceeds 1MB limit."
-    
-    # Read file contents
-    contents = file.file.read()
-    
-    # Upload to Cloudinary
-    url = upload_to_cloudinary(contents, folder="houses")
-    
-    if not url:
-        return None, "Upload to Cloudinary failed."
-    
-    return url, None
 
 @router.post("/add-house")
 async def add_house(
@@ -453,11 +390,301 @@ async def get_selected_house_by_id(house_id:str):
 
 
 
+CHILD_PLAN_TYPES = {"child_savings", "child_property"}
+CHILD_PLAN_STATUSES = {"Active", "Pending", "Completed", "Defaulted", "Cancelled"}
+
+
+def _child_plan_subscriber_snapshot(plan):
+    return {
+        "user_id": str(plan.get("subscriber_user_id") or plan.get("user_id") or ""),
+        "name": plan.get("subscriber_name") or "",
+        "email": plan.get("subscriber_email") or "",
+        "phone": plan.get("subscriber_phone") or "",
+    }
+
+
+def _child_plan_subscriber_from_user(user):
+    if not user:
+        return {}
+    return {
+        "user_id": str(user.get("_id") or ""),
+        "name": user.get("user_name") or user.get("full_name") or "",
+        "email": user.get("email") or "",
+        "phone": user.get("phone_number") or user.get("phone") or "",
+    }
+
+
+def _load_child_subscriber_cache(investments):
+    cache = {}
+    for plan in investments:
+        user_id = str(plan.get("subscriber_user_id") or plan.get("user_id") or "").strip()
+        if not user_id or user_id in cache:
+            continue
+        try:
+            cache[user_id] = user_collection.find_one({"_id": user_id})
+        except Exception as exc:
+            logger.error(f"Child investment subscriber lookup failed for {user_id}: {exc}")
+            cache[user_id] = None
+    return cache
+
+
+def _child_plan_with_subscriber(plan, subscriber_cache):
+    enriched = dict(plan)
+    enriched["_id"] = str(enriched.get("_id", ""))
+    snapshot = _child_plan_subscriber_snapshot(plan)
+    user_id = snapshot.get("user_id") or str(plan.get("user_id") or "")
+    account = _child_plan_subscriber_from_user(subscriber_cache.get(user_id))
+
+    # Keep the historical snapshot when available, but fill missing values from
+    # the current account so legacy records and renamed accounts still resolve.
+    subscriber = {
+        "user_id": user_id,
+        "name": snapshot.get("name") or account.get("name") or "",
+        "email": snapshot.get("email") or account.get("email") or "",
+        "phone": snapshot.get("phone") or account.get("phone") or "",
+    }
+    has_snapshot = any(snapshot.get(key) for key in ("name", "email", "phone"))
+    if subscriber["name"] or subscriber["email"] or subscriber["phone"]:
+        subscriber["source"] = "snapshot" if has_snapshot else "account"
+    else:
+        subscriber["source"] = "missing"
+        subscriber["name"] = "Unknown subscriber"
+    enriched["subscriber"] = subscriber
+    enriched["subscriber_name"] = subscriber["name"]
+    enriched["subscriber_email"] = subscriber["email"]
+    enriched["subscriber_phone"] = subscriber["phone"]
+    return enriched
+
+
+def _resolve_child_plan_subscriber(payload):
+    user_id = str(payload.get("subscriber_user_id") or payload.get("user_id") or "").strip()
+    email = str(payload.get("subscriber_email") or payload.get("email") or "").strip().lower()
+    user = None
+    if user_id:
+        try:
+            user = user_collection.find_one({"_id": user_id})
+        except Exception as exc:
+            logger.error(f"Child investment subscriber lookup failed for {user_id}: {exc}")
+    if not user and email:
+        try:
+            candidates = list(user_collection.find({}))
+        except Exception as exc:
+            logger.error(f"Child investment subscriber search failed for {email}: {exc}")
+            candidates = []
+        user = next(
+            (candidate for candidate in candidates if str(candidate.get("email", "")).lower() == email),
+            None,
+        )
+    if not user:
+        return None, "Select a valid parent/subscriber account"
+    return user, None
+
+
+def _validated_child_plan_data(payload, existing=None):
+    existing = existing or {}
+    data = {}
+
+    child_name = str(payload.get("child_name") or existing.get("child_name") or "").strip()
+    if not child_name:
+        return None, "Child name is required"
+    data["child_name"] = child_name
+
+    child_dob = str(payload.get("child_dob") or existing.get("child_dob") or "").strip()
+    if not child_dob:
+        return None, "Child date of birth is required"
+    data["child_dob"] = child_dob
+
+    data["child_gender"] = str(payload.get("child_gender") or existing.get("child_gender") or "").strip()
+    plan_type = str(payload.get("plan_type") or existing.get("plan_type") or "child_savings")
+    if plan_type not in CHILD_PLAN_TYPES:
+        return None, "Invalid child plan type"
+    data["plan_type"] = plan_type
+
+    try:
+        monthly_amount = float(payload.get("monthly_amount", existing.get("monthly_amount")))
+        total_months = int(payload.get("total_months", existing.get("total_months")))
+        months_paid = int(payload.get("months_paid", existing.get("months_paid", 1)))
+        investment_years = int(payload.get("investment_period_years", existing.get("investment_period_years")))
+        return_percentage = float(payload.get("return_percentage", existing.get("return_percentage", 0)))
+    except (TypeError, ValueError):
+        return None, "Monthly amount, months, investment period, and return percentage must be valid numbers"
+
+    if monthly_amount <= 0:
+        return None, "Monthly amount must be greater than zero"
+    if total_months < 1:
+        return None, "Total months must be at least one"
+    if months_paid < 0 or months_paid > total_months:
+        return None, "Months paid must be between zero and the total months"
+    if investment_years < 1:
+        return None, "Investment period must be at least one year"
+    if return_percentage < 0:
+        return None, "Return percentage cannot be negative"
+
+    status_value = str(payload.get("status") or existing.get("status") or "Active")
+    if status_value not in CHILD_PLAN_STATUSES:
+        return None, "Invalid child investment status"
+
+    data.update({
+        "monthly_amount": monthly_amount,
+        "total_months": total_months,
+        "months_paid": months_paid,
+        "investment_period_years": investment_years,
+        "return_percentage": return_percentage,
+        "expected_return": round(monthly_amount * total_months * (1 + (return_percentage / 100)), 2),
+        "status": status_value,
+    })
+    return data, None
+
+
+def _child_plan_subscriber_fields(user):
+    return {
+        "user_id": str(user.get("_id") or ""),
+        "subscriber_user_id": str(user.get("_id") or ""),
+        "subscriber_name": user.get("user_name") or user.get("full_name") or "",
+        "subscriber_email": user.get("email") or "",
+        "subscriber_phone": user.get("phone_number") or user.get("phone") or "",
+        "subscriber_snapshot_at": datetime.datetime.utcnow().isoformat(),
+    }
+
+
 @router.get("/get-child-investments")
 async def get_child_investments():
     all_investments = list(jard_kidz_collection.find({}))
-    logger.info(f"Fetched {len(all_investments)} child investments")
-    return JSONResponse({"message": "Child investments fetched", "data": all_investments, "status": status.HTTP_200_OK})
+    subscriber_cache = _load_child_subscriber_cache(all_investments)
+    data = [_child_plan_with_subscriber(plan, subscriber_cache) for plan in all_investments]
+    logger.info(f"Fetched {len(data)} child investments with subscriber details")
+    return JSONResponse({"message": "Child investments fetched", "data": data, "status": status.HTTP_200_OK})
+
+
+@router.get("/users/options")
+async def get_child_investment_subscriber_options(
+    search: str = Query(""),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        projection = {"password": 0, "transaction_pin": 0, "otp": 0}
+        users = list(user_collection.find({}, projection=projection))
+        term = (search or "").strip().lower()
+        if term:
+            users = [
+                user for user in users
+                if term in str(user.get("user_name") or "").lower()
+                or term in str(user.get("email") or "").lower()
+                or term in str(user.get("phone_number") or user.get("phone") or "").lower()
+            ]
+        users.sort(key=lambda user: str(user.get("user_name") or user.get("email") or "").lower())
+        data = [
+            {
+                "_id": str(user.get("_id") or ""),
+                "user_name": user.get("user_name") or user.get("full_name") or "",
+                "email": user.get("email") or "",
+                "phone_number": user.get("phone_number") or user.get("phone") or "",
+            }
+            for user in users[:limit]
+        ]
+        return JSONResponse({"message": "Subscriber options fetched", "data": data, "status": status.HTTP_200_OK})
+    except Exception as exc:
+        logger.error(f"Error fetching child investment subscriber options: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.post("/add-child-investment")
+async def add_child_investment(payload: dict, admin: dict = Depends(verify_admin_token)):
+    try:
+        payload = payload or {}
+        user, error = _resolve_child_plan_subscriber(payload)
+        if error:
+            return JSONResponse({"message": error, "status": 400})
+        data, error = _validated_child_plan_data(payload)
+        if error:
+            return JSONResponse({"message": error, "status": 400})
+
+        now = datetime.datetime.utcnow()
+        data.update(_child_plan_subscriber_fields(user))
+        data.update({
+            "created_at": now.isoformat(),
+            "next_payment_date": (now + datetime.timedelta(days=30)).isoformat(),
+            "auto_debit": False,
+            "encrypted_pin": "",
+            "penalty_amount": 0.0,
+            "reminder_7d_sent": False,
+            "reminder_3d_sent": False,
+            "created_by_admin": str(admin.get("_id") or ""),
+        })
+        result = jard_kidz_collection.insert_one(data)
+        return JSONResponse({
+            "message": "Child investment created successfully",
+            "id": str(result.inserted_id),
+            "status": 200,
+        })
+    except Exception as exc:
+        logger.error(f"Error creating child investment: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.put("/update-child-investment/{plan_id}")
+async def update_child_investment(plan_id: str, payload: dict, admin: dict = Depends(verify_admin_token)):
+    try:
+        plan = jard_kidz_collection.find_one({"_id": plan_id})
+        if not plan:
+            return JSONResponse({"message": "Child investment not found", "status": 404})
+        payload = payload or {}
+        data, error = _validated_child_plan_data(payload, existing=plan)
+        if error:
+            return JSONResponse({"message": error, "status": 400})
+
+        subscriber_changed = any(
+            key in payload for key in ("subscriber_user_id", "user_id", "subscriber_email")
+        )
+        if subscriber_changed:
+            user, error = _resolve_child_plan_subscriber(payload)
+            if error:
+                return JSONResponse({"message": error, "status": 400})
+            data.update(_child_plan_subscriber_fields(user))
+
+        data["updated_at"] = datetime.datetime.utcnow().isoformat()
+        data["updated_by_admin_id"] = str(admin.get("_id") or "")
+        jard_kidz_collection.update_one({"_id": plan_id}, {"$set": data})
+        return JSONResponse({"message": "Child investment updated successfully", "status": 200})
+    except Exception as exc:
+        logger.error(f"Error updating child investment {plan_id}: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.patch("/update-child-status/{plan_id}")
+async def update_child_investment_status(plan_id: str, payload: dict, admin: dict = Depends(verify_admin_token)):
+    try:
+        plan = jard_kidz_collection.find_one({"_id": plan_id})
+        if not plan:
+            return JSONResponse({"message": "Child investment not found", "status": 404})
+        new_status = str((payload or {}).get("status") or "").strip()
+        if new_status not in CHILD_PLAN_STATUSES:
+            return JSONResponse({"message": "Invalid child investment status", "status": 400})
+        jard_kidz_collection.update_one(
+            {"_id": plan_id},
+            {"$set": {
+                "status": new_status,
+                "updated_at": datetime.datetime.utcnow().isoformat(),
+                "updated_by_admin_id": str(admin.get("_id") or ""),
+            }},
+        )
+        return JSONResponse({"message": "Child investment status updated successfully", "status": 200})
+    except Exception as exc:
+        logger.error(f"Error updating child investment status {plan_id}: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.delete("/delete-child-investment/{plan_id}")
+async def delete_child_investment(plan_id: str):
+    try:
+        plan = jard_kidz_collection.find_one({"_id": plan_id})
+        if not plan:
+            return JSONResponse({"message": "Child investment not found", "status": 404})
+        jard_kidz_collection.delete_one({"_id": plan_id})
+        return JSONResponse({"message": "Child investment deleted successfully", "status": status.HTTP_200_OK})
+    except Exception as exc:
+        logger.error(f"Error deleting child investment {plan_id}: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
 
 
 # --- USER MANAGEMENT ENDPOINTS ---
@@ -1157,11 +1384,6 @@ async def reject_transaction(tx_ref: str):
 
 # --- JARDPROC MANAGEMENT ---
 
-def save_product_image(file: UploadFile):
-    contents = file.file.read()
-    url = upload_to_cloudinary(contents, folder="products")
-    return url
-
 @router.post("/add-product")
 async def add_product(
     name: str = Form(...),
@@ -1716,3 +1938,157 @@ async def get_subscriptions_list(type: str = "all"):
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# Staff accounts (admin-managed, web portal only)
+# ---------------------------------------------------------------------------
+
+STAFF_ROLE = "staff"
+STAFF_PERMISSIONS = {"estates.manage", "products.manage", "settings.support"}
+STAFF_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalize_staff_permissions(value):
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    cleaned = []
+    for item in value:
+        perm = str(item or "").strip()
+        if perm in STAFF_PERMISSIONS and perm not in cleaned:
+            cleaned.append(perm)
+    return cleaned
+
+
+def _staff_admin_emails():
+    return [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "jarvadgroup.business@gmail.com").split(",") if e.strip()]
+
+
+def _staff_public_doc(user):
+    return {
+        "_id": str(user.get("_id", "")),
+        "user_name": user.get("user_name", ""),
+        "email": user.get("email", ""),
+        "permissions": list(user.get("permissions") or []),
+        "staff_active": bool(user.get("staff_active", True)),
+        "must_change_password": bool(user.get("must_change_password")),
+        "staff_created_by": user.get("staff_created_by", ""),
+        "staff_created_at": user.get("staff_created_at", ""),
+        "last_password_change": user.get("password_updated_at", ""),
+    }
+
+
+@router.post("/staff")
+async def create_staff_account(payload: dict, admin=Depends(verify_admin_token)):
+    try:
+        email = str((payload or {}).get("email") or "").strip().lower()
+        user_name = str((payload or {}).get("user_name") or (payload or {}).get("name") or "").strip()
+        password = str((payload or {}).get("password") or "")
+        permissions = _normalize_staff_permissions((payload or {}).get("permissions"))
+
+        if not email or not STAFF_EMAIL_RE.match(email):
+            return JSONResponse({"message": "A valid email address is required", "status": 400})
+        if email in _staff_admin_emails():
+            return JSONResponse({"message": "This email is reserved for an administrator", "status": 400})
+        if len(password) < 8:
+            return JSONResponse({"message": "Temporary password must be at least 8 characters", "status": 400})
+        if not permissions:
+            return JSONResponse({"message": "Select at least one permission", "status": 400})
+
+        existing = user_collection.find_one({"email": email})
+        if existing:
+            return JSONResponse({"message": "A user with this email already exists", "status": 400})
+
+        now = datetime.datetime.utcnow().isoformat()
+        doc = {
+            "user_name": user_name or email.split("@")[0],
+            "email": email,
+            "phone_number": "",
+            "profile_pic": "",
+            "wallet_balance": 0.0,
+            "password": hashedpassword(password),
+            "otp": "",
+            "transaction_pin": "",
+            "referral_code": secrets.token_hex(4).upper(),
+            "referred_by": "",
+            "partner_type": "normal",
+            "role": STAFF_ROLE,
+            "permissions": permissions,
+            "staff_active": True,
+            "must_change_password": True,
+            "staff_created_by": str(admin.get("_id", "")),
+            "staff_created_at": now,
+            "created_at": now,
+        }
+        inserted = user_collection.insert_one(doc).inserted_id
+
+        return JSONResponse({
+            "message": "Staff account created successfully",
+            "status": 200,
+            "data": _staff_public_doc({**doc, "_id": inserted}),
+            "temporary_password": password,
+        })
+    except Exception as exc:
+        logger.error(f"Error creating staff account: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.get("/staff")
+async def list_staff_accounts():
+    try:
+        staff = list(user_collection.find({"role": STAFF_ROLE}))
+        staff.sort(key=lambda item: item.get("staff_created_at", ""), reverse=True)
+        return JSONResponse({
+            "message": "Staff accounts fetched",
+            "status": 200,
+            "data": [_staff_public_doc(item) for item in staff],
+        })
+    except Exception as exc:
+        logger.error(f"Error listing staff accounts: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})
+
+
+@router.patch("/staff/{user_id}")
+async def update_staff_account(user_id: str, payload: dict, admin=Depends(verify_admin_token)):
+    try:
+        staff = user_collection.find_one({"_id": user_id})
+        if not staff or staff.get("role") != STAFF_ROLE:
+            return JSONResponse({"message": "Staff account not found", "status": 404})
+
+        payload = payload or {}
+        updates = {}
+        temporary_password = None
+
+        if "permissions" in payload:
+            permissions = _normalize_staff_permissions(payload.get("permissions"))
+            if not permissions:
+                return JSONResponse({"message": "Select at least one permission", "status": 400})
+            updates["permissions"] = permissions
+        if "user_name" in payload:
+            updates["user_name"] = str(payload.get("user_name") or "").strip()
+        if "staff_active" in payload:
+            updates["staff_active"] = bool(payload.get("staff_active"))
+
+        if payload.get("reset_password"):
+            temporary_password = secrets.token_urlsafe(9)
+            updates["password"] = hashedpassword(temporary_password)
+            updates["must_change_password"] = True
+            updates["password_updated_at"] = datetime.datetime.utcnow().isoformat()
+
+        if not updates:
+            return JSONResponse({"message": "No changes provided", "status": 400})
+
+        updates["updated_at"] = datetime.datetime.utcnow().isoformat()
+        updates["updated_by"] = str(admin.get("_id", ""))
+        user_collection.update_one({"_id": user_id}, {"$set": updates})
+
+        refreshed = user_collection.find_one({"_id": user_id})
+        return JSONResponse({
+            "message": "Staff account updated",
+            "status": 200,
+            "data": _staff_public_doc(refreshed or staff),
+            "temporary_password": temporary_password,
+        })
+    except Exception as exc:
+        logger.error(f"Error updating staff account: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500})

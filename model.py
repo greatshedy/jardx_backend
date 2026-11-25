@@ -94,6 +94,12 @@ class JardKidzPlan(BaseModel):
     plan_type: str = "child_savings" # 'child_savings' or 'child_property'
     status: str = "Active"
     created_at: str = ""
+    subscriber_user_id: str = ""
+    subscriber_name: str = ""
+    subscriber_email: str = ""
+    subscriber_phone: str = ""
+    subscriber_snapshot_at: str = ""
+    created_by_admin: str = ""
 
 class ForgotPassword(BaseModel):
     email: EmailStr

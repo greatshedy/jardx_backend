@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-from routes import users, admin, payment, finance, portfolio, jardproc, withdraw, block
+from routes import users, admin, staff, payment, finance, portfolio, jardproc, withdraw, block
 from routes.test_runner.routes import router as test_runner_router
 from routes.db_tool import router as db_tool_router
 
@@ -127,6 +127,7 @@ app.add_middleware(
 
 app.include_router(users.router)
 app.include_router(admin.router)
+app.include_router(staff.router)
 app.include_router(payment.router)
 app.include_router(finance.router)
 app.include_router(portfolio.router)

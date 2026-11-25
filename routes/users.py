@@ -60,6 +60,8 @@ def _sanitize_web_user(user: dict) -> dict:
         "is_partner": bool(user.get("is_partner")),
         "referral_code": user.get("referral_code", ""),
         "housing_registration_paid": bool(user.get("housing_registration_paid")),
+        "role": user.get("role", "user"),
+        "permissions": list(user.get("permissions") or []),
     }
 
 
@@ -1390,6 +1392,8 @@ async def Login(user:Login):
     if user_data["password"] != "":
         user_from_db=user_collection.find_one({"email":user_data["email"]})
         if user_from_db:
+            if user_from_db.get("role") == "staff":
+                return JSONResponse({"message":"Please use the staff portal to sign in","status":status.HTTP_403_FORBIDDEN}, status_code=status.HTTP_403_FORBIDDEN)
             try:
                 password_state=VerifyHashed(user_from_db["password"],user_data["password"])
                 if password_state:
@@ -1400,7 +1404,9 @@ async def Login(user:Login):
                         "user_name": user_from_db.get("user_name", ""),
                         "email": user_from_db.get("email", ""),
                         "phone_number": user_from_db.get("phone_number", ""),
-                        "profile_pic": user_from_db.get("profile_pic", "")
+                        "profile_pic": user_from_db.get("profile_pic", ""),
+                        "role": user_from_db.get("role", "user"),
+                        "permissions": list(user_from_db.get("permissions") or [])
                     }
                     return JSONResponse({"message":"Login Successful","token":token, "user": user_info, "status":status.HTTP_200_OK})
                 return JSONResponse({"message":"Incorrect password","status":status.HTTP_401_UNAUTHORIZED})
@@ -1413,6 +1419,8 @@ async def Login(user:Login):
     elif user_data["otp"] !="":
         user_from_db=user_collection.find_one({"email":user_data["email"]})
         if user_from_db:
+            if user_from_db.get("role") == "staff":
+                return JSONResponse({"message":"Please use the staff portal to sign in","status":status.HTTP_403_FORBIDDEN}, status_code=status.HTTP_403_FORBIDDEN)
             try:
                 # Check expiry
                 expiry = user_from_db.get("otp_expiry")
@@ -1429,7 +1437,9 @@ async def Login(user:Login):
                         "user_name": user_from_db.get("user_name", ""),
                         "email": user_from_db.get("email", ""),
                         "phone_number": user_from_db.get("phone_number", ""),
-                        "profile_pic": user_from_db.get("profile_pic", "")
+                        "profile_pic": user_from_db.get("profile_pic", ""),
+                        "role": user_from_db.get("role", "user"),
+                        "permissions": list(user_from_db.get("permissions") or [])
                     }
                     # Reset OTP and rate-limit tracking after successful login
                     user_collection.update_one(
@@ -2357,7 +2367,7 @@ async def check_user_exists(data: dict):
     if not email:
         return JSONResponse({"exists": False, "status": 400})
     user = user_collection.find_one({"email": email})
-    if user:
+    if user and user.get("role") != "staff":
         return JSONResponse({
             "exists": True,
             "user_name": user.get("user_name", ""),
@@ -2916,7 +2926,13 @@ async def create_jard_kidz_plan(plan_data: JardKidzPlan, background_tasks: Backg
         user_data = user_collection.find_one({"_id": user_id})
         if not user_data:
             return JSONResponse(status_code=404, content={"message": "User not found"})
-        
+
+        plan["subscriber_user_id"] = str(user_id)
+        plan["subscriber_name"] = user_data.get("user_name") or user_data.get("full_name") or ""
+        plan["subscriber_email"] = user_data.get("email") or ""
+        plan["subscriber_phone"] = user_data.get("phone_number") or user_data.get("phone") or ""
+        plan["subscriber_snapshot_at"] = plan["created_at"]
+
         monthly_payment = float(plan["monthly_amount"])
         if user_data["wallet_balance"] < monthly_payment:
             return JSONResponse(status_code=400, content={"message": "Insufficient balance for first month payment"})
