@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, UploadFile, Form, Depends, HTTPException, Query
-from typing import List
+from typing import List, Optional
 from model import House, JardKidzPlan
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from starlette import status
 from utill import get_token, chunk_base64_string, reassemble_base64_string, get_image_url, upload_to_cloudinary, delete_from_cloudinary, hashedpassword
 from utils.house_service import (
@@ -12,6 +12,8 @@ from utils.house_service import (
 )
 from utils.product_service import save_product_image
 
+import csv
+import io
 import logging
 import os
 import re
@@ -2094,3 +2096,392 @@ async def update_staff_account(user_id: str, payload: dict, admin=Depends(verify
     except Exception as exc:
         logger.error(f"Error updating staff account: {exc}")
         return JSONResponse({"message": str(exc), "status": 500})
+
+
+# ---------------------------------------------------------------------------
+# User portfolios (property investments + savings) tracking
+# ---------------------------------------------------------------------------
+
+def _pf_float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pf_parse_dt(value):
+    if not value:
+        return None
+    if isinstance(value, datetime.datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _pf_plan_label(doc):
+    plan_type = str(doc.get("plan_type") or "").strip()
+    normalized = plan_type.lower().replace("_", " ")
+    if doc.get("housing_subscription_id") or doc.get("market_mode") == "housing":
+        return "Housing Saving"
+    if doc.get("is_jardhouz_saving") or normalized in {"jardhouz saving", "jardhouz savings"}:
+        return "JardHouz Saving"
+    if normalized == "outright":
+        return "Outright"
+    if normalized == "installment":
+        return "Installment"
+    return plan_type.title() if plan_type else "Unknown"
+
+
+def _pf_user(user_id, cache):
+    key = str(user_id or "")
+    if key in cache:
+        return cache[key]
+    user = None
+    if key:
+        try:
+            user = user_collection.find_one(
+                {"_id": key},
+                projection={"user_name": 1, "email": 1, "phone_number": 1, "phone": 1},
+            )
+        except Exception:
+            user = None
+    user = user or {}
+    info = {
+        "_id": key,
+        "user_name": user.get("user_name") or user.get("full_name") or "Unknown user",
+        "email": user.get("email") or "",
+        "phone_number": user.get("phone_number") or user.get("phone") or "",
+    }
+    cache[key] = info
+    return info
+
+
+def _pf_image(doc):
+    image = doc.get("house_image")
+    if isinstance(image, list):
+        if not image:
+            return ""
+        first = image[0]
+        if isinstance(first, list):
+            try:
+                return reassemble_base64_string(first)
+            except Exception:
+                return ""
+        return get_image_url(first) if first else ""
+    if isinstance(image, str) and image:
+        return get_image_url(image)
+    return ""
+
+
+def _pf_row(doc, user_cache, now=None):
+    now = now or datetime.datetime.utcnow()
+    total = _pf_float(doc.get("total_price"))
+    paid = _pf_float(doc.get("amount_paid"))
+    raw_remaining = doc.get("remaining_balance")
+    remaining = _pf_float(raw_remaining) if raw_remaining is not None else max(total - paid, 0.0)
+    remaining = max(0.0, remaining)
+    progress = round(min(100.0, (paid / total * 100.0) if total > 0 else 0.0), 1)
+    due_dt = _pf_parse_dt(doc.get("next_payment_date"))
+    status_value = str(doc.get("status") or "Unknown")
+    overdue = False
+    days_until_due = None
+    days_overdue = None
+    if due_dt:
+        delta_days = (due_dt.date() - now.date()).days
+        if status_value.lower() == "active" and delta_days < 0:
+            overdue = True
+            days_overdue = abs(delta_days)
+        else:
+            days_until_due = max(delta_days, 0)
+    return {
+        "_id": str(doc.get("_id") or ""),
+        "user_id": str(doc.get("user_id") or ""),
+        "user": _pf_user(doc.get("user_id"), user_cache),
+        "house_id": str(doc.get("house_id") or doc.get("estate_id") or ""),
+        "house_name": doc.get("house_name") or "Unknown estate",
+        "plan_type": doc.get("plan_type") or "",
+        "plan_label": _pf_plan_label(doc),
+        "housing_subscription_id": str(doc.get("housing_subscription_id") or ""),
+        "total_price": round(total, 2),
+        "amount_paid": round(paid, 2),
+        "remaining_balance": round(remaining, 2),
+        "progress_percent": progress,
+        "months_paid": int(doc.get("months_paid") or 0),
+        "duration_months": int(doc.get("duration_months") or 0),
+        "monthly_payment": round(_pf_float(doc.get("monthly_payment")), 2),
+        "frequency": doc.get("frequency") or "",
+        "next_payment_date": doc.get("next_payment_date") or "",
+        "status": status_value,
+        "auto_debit": bool(doc.get("auto_debit")),
+        "penalty_amount": round(_pf_float(doc.get("penalty_amount")), 2),
+        "overdue": overdue,
+        "days_until_due": days_until_due,
+        "days_overdue": days_overdue,
+        "created_at": doc.get("created_at") or "",
+    }
+
+
+def _pf_filter_rows(rows, search=None, status_value=None, plan_type=None, overdue=None, auto_debit=None, user_id=None):
+    result = rows
+    if user_id:
+        target = str(user_id)
+        result = [row for row in result if row["user_id"] == target]
+    if status_value:
+        target = status_value.strip().lower()
+        result = [row for row in result if row["status"].strip().lower() == target]
+    if plan_type:
+        target = plan_type.strip().lower()
+        result = [
+            row for row in result
+            if target in {(row.get("plan_label") or "").lower(), (row.get("plan_type") or "").lower()}
+        ]
+    if overdue is not None:
+        result = [row for row in result if bool(row["overdue"]) == bool(overdue)]
+    if auto_debit is not None:
+        result = [row for row in result if bool(row["auto_debit"]) == bool(auto_debit)]
+    if search and search.strip():
+        term = search.strip().lower()
+
+        def matches(row):
+            user = row.get("user") or {}
+            haystack = " ".join(str(value or "") for value in (
+                row.get("_id"),
+                row.get("house_name"),
+                row.get("plan_label"),
+                row.get("housing_subscription_id"),
+                row.get("user_id"),
+                user.get("user_name"),
+                user.get("email"),
+                user.get("phone_number"),
+            )).lower()
+            return term in haystack
+
+        result = [row for row in result if matches(row)]
+    return result
+
+
+def _pf_sort_rows(rows, sort_by="created_at", sort_dir="desc"):
+    numeric_fields = {
+        "total_price",
+        "amount_paid",
+        "remaining_balance",
+        "progress_percent",
+        "penalty_amount",
+        "months_paid",
+        "duration_months",
+    }
+    allowed = numeric_fields | {"created_at", "next_payment_date", "status", "house_name"}
+    field = sort_by if sort_by in allowed else "created_at"
+    reverse = str(sort_dir or "desc").lower() != "asc"
+
+    def key(row):
+        if field in numeric_fields:
+            return _pf_float(row.get(field))
+        if field == "next_payment_date":
+            return _pf_parse_dt(row.get(field)) or datetime.datetime.max
+        return str(row.get(field) or "").lower()
+
+    rows.sort(key=key, reverse=reverse)
+    return rows
+
+
+def _pf_summary(rows):
+    return {
+        "total_portfolios": len(rows),
+        "total_value": round(sum(row["total_price"] for row in rows), 2),
+        "total_collected": round(sum(row["amount_paid"] for row in rows), 2),
+        "outstanding": round(sum(row["remaining_balance"] for row in rows), 2),
+        "active": sum(1 for row in rows if row["status"].strip().lower() == "active"),
+        "overdue": sum(1 for row in rows if row["overdue"]),
+        "completed": sum(1 for row in rows if row["status"].strip().lower() == "completed"),
+        "auto_debit": sum(1 for row in rows if row["auto_debit"]),
+    }
+
+
+def _pf_build_rows(search=None, status_value=None, plan_type=None, overdue=None, auto_debit=None, user_id=None, sort_by="created_at", sort_dir="desc"):
+    documents = list(portfolio_collection.find({}))
+    user_cache = {}
+    now = datetime.datetime.utcnow()
+    rows = [_pf_row(doc, user_cache, now) for doc in documents]
+    rows = _pf_filter_rows(rows, search, status_value, plan_type, overdue, auto_debit, user_id)
+    return _pf_sort_rows(rows, sort_by, sort_dir)
+
+
+@router.get("/portfolios")
+async def admin_list_portfolios(
+    search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    plan_type: Optional[str] = Query(None),
+    overdue: Optional[bool] = Query(None),
+    auto_debit: Optional[bool] = Query(None),
+    user_id: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    sort_by: str = Query("created_at"),
+    sort_dir: str = Query("desc"),
+):
+    try:
+        rows = _pf_build_rows(search, status_filter, plan_type, overdue, auto_debit, user_id, sort_by, sort_dir)
+        summary = _pf_summary(rows)
+        total = len(rows)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        current_page = min(max(page, 1), total_pages)
+        start = (current_page - 1) * page_size
+        return JSONResponse({
+            "message": "Portfolios fetched",
+            "status": 200,
+            "data": rows[start:start + page_size],
+            "summary": summary,
+            "pagination": {
+                "total_count": total,
+                "total_pages": total_pages,
+                "current_page": current_page,
+                "page_size": page_size,
+            },
+        })
+    except Exception as exc:
+        logger.error(f"Error listing portfolios: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500}, status_code=500)
+
+
+@router.get("/portfolios/export")
+async def admin_export_portfolios(
+    search: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    plan_type: Optional[str] = Query(None),
+    overdue: Optional[bool] = Query(None),
+    auto_debit: Optional[bool] = Query(None),
+    user_id: Optional[str] = Query(None),
+    sort_by: str = Query("created_at"),
+    sort_dir: str = Query("desc"),
+):
+    try:
+        rows = _pf_build_rows(search, status_filter, plan_type, overdue, auto_debit, user_id, sort_by, sort_dir)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Portfolio ID",
+            "User",
+            "Email",
+            "Phone",
+            "Estate",
+            "Plan Type",
+            "Total Price",
+            "Amount Paid",
+            "Outstanding",
+            "Progress %",
+            "Months Paid",
+            "Duration Months",
+            "Next Payment Date",
+            "Status",
+            "Auto Debit",
+            "Penalty",
+            "Created",
+        ])
+        for row in rows:
+            user = row.get("user") or {}
+            writer.writerow([
+                row.get("_id", ""),
+                user.get("user_name", ""),
+                user.get("email", ""),
+                user.get("phone_number", ""),
+                row.get("house_name", ""),
+                row.get("plan_label", ""),
+                row.get("total_price", 0),
+                row.get("amount_paid", 0),
+                row.get("remaining_balance", 0),
+                row.get("progress_percent", 0),
+                row.get("months_paid", 0),
+                row.get("duration_months", 0),
+                row.get("next_payment_date", ""),
+                row.get("status", ""),
+                "Yes" if row.get("auto_debit") else "No",
+                row.get("penalty_amount", 0),
+                row.get("created_at", ""),
+            ])
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="portfolios.csv"'},
+        )
+    except Exception as exc:
+        logger.error(f"Error exporting portfolios: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500}, status_code=500)
+
+
+@router.get("/portfolios/{portfolio_id}")
+async def admin_get_portfolio(portfolio_id: str):
+    try:
+        document = portfolio_collection.find_one({"_id": portfolio_id})
+        if not document:
+            return JSONResponse({"message": "Portfolio not found", "status": 404}, status_code=404)
+
+        user_cache = {}
+        row = _pf_row(document, user_cache)
+        row["house_image"] = _pf_image(document)
+
+        house = None
+        house_id = str(document.get("house_id") or document.get("estate_id") or "")
+        if house_id:
+            try:
+                house_doc = house_collection.find_one(
+                    {"_id": house_id},
+                    projection={"house_name": 1, "house_location": 1, "house_type": 1},
+                )
+            except Exception:
+                house_doc = None
+            if house_doc:
+                house = {
+                    "_id": house_id,
+                    "house_name": house_doc.get("house_name", ""),
+                    "house_location": house_doc.get("house_location", ""),
+                    "house_type": house_doc.get("house_type", ""),
+                }
+
+        subscription = None
+        subscription_id = str(document.get("housing_subscription_id") or "")
+        if subscription_id:
+            try:
+                subscription_doc = housing_subscriptions_collection.find_one({"_id": subscription_id})
+            except Exception:
+                subscription_doc = None
+            if subscription_doc:
+                subscription_doc = dict(subscription_doc)
+                subscription_doc["_id"] = str(subscription_doc.get("_id", ""))
+                subscription_doc.pop("encrypted_pin", None)
+                subscription = subscription_doc
+
+        transactions = []
+        try:
+            transaction_docs = list(transactions_collection.find({"portfolio_id": portfolio_id}))
+        except Exception:
+            transaction_docs = []
+        for transaction in transaction_docs:
+            transaction = dict(transaction)
+            transaction["_id"] = str(transaction.get("_id", ""))
+            transaction.pop("encrypted_pin", None)
+            transactions.append(transaction)
+        transactions.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+
+        return JSONResponse({
+            "message": "Portfolio fetched",
+            "status": 200,
+            "data": {
+                "portfolio": row,
+                "house": house,
+                "housing_subscription": subscription,
+                "transactions": transactions,
+            },
+        })
+    except Exception as exc:
+        logger.error(f"Error fetching portfolio {portfolio_id}: {exc}")
+        return JSONResponse({"message": str(exc), "status": 500}, status_code=500)

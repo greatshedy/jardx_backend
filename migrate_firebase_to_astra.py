@@ -241,13 +241,49 @@ def sanitize(obj):
 # ---------------------------------------------------------------- phase 2 mappers
 
 def uid_of(doc, by_uid, by_email):
-    uid = doc.get("userId")
-    if uid:
-        return uid
+    # Prefer the deduplicated email mapping so legacy Firebase UIDs do not get
+    # copied into the live database as orphaned user references.
     email = norm_email(doc.get("userEmail") or doc.get("email") or doc.get("investorEmail"))
     if email and email in by_email:
         return by_email[email]
-    return ""
+    uid = doc.get("userId")
+    if uid and str(uid) in by_uid:
+        return str(by_uid[str(uid)].get("_id") or uid)
+    return str(uid or "")
+
+
+def _norm_house_name(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
+
+
+HOUSE_TITLE_ALIASES = {
+    "ebenezery estate": "ebenezery-estate",
+    "wisdom court estate": "wisdom-court-estate",
+    "jarvad estate": "jarvad-estate-isaga",
+    "jarvad estate easter promo": "jarvad-estate-ayetoro",
+    "land banking mini estate entrepreneurs": "land-banking-mini-estate",
+    "joyhills estate": "joyhills-estate",
+}
+
+
+def resolve_house_id(doc, fs):
+    raw = doc.get("estateId") if doc.get("estateId") is not None else doc.get("propertyId")
+    if isinstance(raw, str) and raw.strip() and not raw.strip().isdigit():
+        return raw.strip()
+    title = _norm_house_name(
+        doc.get("estateTitle")
+        or doc.get("propertyTitle")
+        or doc.get("estateName")
+        or doc.get("landName")
+    )
+    if title:
+        for estate in fs.get("estates", []):
+            if _norm_house_name(estate.get("title") or estate.get("name")) == title:
+                return str(estate.get("_id") or estate.get("id") or "")
+        alias = HOUSE_TITLE_ALIASES.get(title)
+        if alias:
+            return alias
+    return raw if isinstance(raw, str) else ""
 
 
 def _iso(v):
@@ -304,7 +340,8 @@ def map_portfolio(fs, by_uid, by_email):
         out.append({
             "_id": p.get("_id"),
             "user_id": uid_of(p, by_uid, by_email),
-            "house_id": p.get("estateId") or "",
+            "user_email": norm_email(p.get("userEmail")),
+            "house_id": resolve_house_id(p, fs),
             "house_name": p.get("estateTitle") or "",
             "plan_type": "outright" if "outright" in (p.get("selectedPlan") or "").lower() else "installment",
             "total_price": total, "amount_paid": paid,
@@ -323,7 +360,8 @@ def map_portfolio(fs, by_uid, by_email):
         out.append({
             "_id": pl.get("_id"),
             "user_id": uid_of(pl, by_uid, by_email),
-            "house_id": pl.get("propertyId") or "",
+            "user_email": norm_email(pl.get("userEmail")),
+            "house_id": resolve_house_id(pl, fs),
             "house_name": pl.get("propertyTitle") or "",
             "plan_type": "installment",
             "total_price": total, "amount_paid": paid,
@@ -346,6 +384,7 @@ def map_kidvest(fs, by_uid, by_email):
         out.append({
             "_id": k.get("_id"),
             "user_id": uid_of(k, by_uid, by_email),
+            "user_email": norm_email(k.get("userEmail")),
             "child_name": k.get("childName") or k.get("kidName") or "",
             "child_dob": k.get("childDateOfBirth") or "",
             "child_gender": k.get("childGender") or "",

@@ -102,10 +102,16 @@ async def initialize_payment(payload: dict, data: dict = Depends(get_token)):
         }
 
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"Payment Init Error Details:\n{error_details}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Payment init failed for ref=%s gateway=%s: %s",
+            tx_ref,
+            gateway_name,
+            e,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Payment provider rejected the request. Please try again or contact support.",
+        )
 
 @router.get("/verify-transaction/{tx_ref}")
 async def verify_transaction(tx_ref: str, data: dict = Depends(get_token)):
@@ -197,9 +203,11 @@ async def verify_transaction(tx_ref: str, data: dict = Depends(get_token)):
             return {"status": "pending", "message": f"Payment status: {gateway_status}"}
 
     except Exception as e:
-        import traceback
-        logger.error(f"Verification Error for {tx_ref}:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error verifying transaction: {str(e)}")
+        logger.exception("Verification error for %s: %s", tx_ref, e)
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to verify the payment with the provider. Please try again.",
+        )
 
 @router.post("/webhook/{provider}")
 async def handle_payment_webhook(provider: str, request: Request):

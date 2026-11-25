@@ -135,7 +135,11 @@ app.include_router(jardproc.router)
 app.include_router(withdraw.router)
 app.include_router(block.user_router)
 app.include_router(block.admin_router)
-app.include_router(test_runner_router)
+
+test_runner_enabled = (os.getenv("ENABLE_TEST_RUNNER", "false") or "").strip().lower() in ("1", "true", "yes", "on")
+if test_runner_enabled:
+    app.include_router(test_runner_router)
+
 app.include_router(db_tool_router)
 
 # --- Keep-Alive & Health Check Logic ---
@@ -177,3 +181,18 @@ async def startup_event():
         logger.info("APScheduler started - running every 60 seconds")
     except Exception as e:
         logger.error(f"Failed to start APScheduler: {e}")
+
+    try:
+        from utils.payment_gateways.monnify import MonnifyGateway
+
+        logger.info("Monnify config: %s", MonnifyGateway().describe_config())
+    except Exception as e:
+        logger.error("Could not resolve Monnify config: %s", e)
+
+    logger.info("Test runner: %s", "enabled" if test_runner_enabled else "disabled")
+    if test_runner_enabled:
+        logger.info(
+            "Test runner credentials configured: user=%s password=%s",
+            bool(os.getenv("TEST_RUNNER_USER")),
+            bool(os.getenv("TEST_RUNNER_PASS")),
+        )

@@ -6,8 +6,8 @@ logger = logging.getLogger("jardx")
 
 TESTS = [
     {"id": "db-connection", "name": "DB Connection", "description": "Tests connectivity to user, house, and transaction collections"},
-    {"id": "monnify-auth", "name": "Monnify Auth Token", "description": "Attempts to obtain an authentication token from Monnify sandbox"},
-    {"id": "monnify-init", "name": "Monnify Init Payment", "description": "Initializes a test payment via Monnify (no DB save)"},
+    {"id": "monnify-auth", "name": "Monnify Auth Token", "description": "Attempts to obtain an authentication token from the configured Monnify environment"},
+    {"id": "monnify-init", "name": "Monnify Init Payment", "description": "Initializes a test payment via the configured Monnify environment (no DB save)"},
     {"id": "flutterwave-init", "name": "Flutterwave Init Payment", "description": "Initializes a test payment via Flutterwave (no DB save)"},
     {"id": "backend-health", "name": "Backend Health", "description": "Checks that all route modules and core utilities load correctly"},
 ]
