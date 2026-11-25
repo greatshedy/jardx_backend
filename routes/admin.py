@@ -2189,7 +2189,8 @@ def _pf_row(doc, user_cache, now=None):
     raw_remaining = doc.get("remaining_balance")
     remaining = _pf_float(raw_remaining) if raw_remaining is not None else max(total - paid, 0.0)
     remaining = max(0.0, remaining)
-    progress = round(min(100.0, (paid / total * 100.0) if total > 0 else 0.0), 1)
+    total_recorded = total > 0
+    progress = round(min(100.0, paid / total * 100.0), 1) if total_recorded else None
     due_dt = _pf_parse_dt(doc.get("next_payment_date"))
     status_value = str(doc.get("status") or "Unknown")
     overdue = False
@@ -2202,16 +2203,29 @@ def _pf_row(doc, user_cache, now=None):
             days_overdue = abs(delta_days)
         else:
             days_until_due = max(delta_days, 0)
+    user_info = _pf_user(doc.get("user_id"), user_cache)
+    if user_info.get("user_name") == "Unknown user":
+        fallback_email = str(doc.get("user_email") or "").strip()
+        fallback_name = str(doc.get("user_name") or "").strip()
+        if fallback_email or fallback_name:
+            user_info = {
+                "_id": str(doc.get("user_id") or ""),
+                "user_name": fallback_name or fallback_email,
+                "email": fallback_email,
+                "phone_number": user_info.get("phone_number") or "",
+            }
+
     return {
         "_id": str(doc.get("_id") or ""),
         "user_id": str(doc.get("user_id") or ""),
-        "user": _pf_user(doc.get("user_id"), user_cache),
+        "user": user_info,
         "house_id": str(doc.get("house_id") or doc.get("estate_id") or ""),
         "house_name": doc.get("house_name") or "Unknown estate",
         "plan_type": doc.get("plan_type") or "",
         "plan_label": _pf_plan_label(doc),
         "housing_subscription_id": str(doc.get("housing_subscription_id") or ""),
         "total_price": round(total, 2),
+        "total_recorded": total_recorded,
         "amount_paid": round(paid, 2),
         "remaining_balance": round(remaining, 2),
         "progress_percent": progress,
@@ -2304,6 +2318,7 @@ def _pf_summary(rows):
         "overdue": sum(1 for row in rows if row["overdue"]),
         "completed": sum(1 for row in rows if row["status"].strip().lower() == "completed"),
         "auto_debit": sum(1 for row in rows if row["auto_debit"]),
+        "missing_total": sum(1 for row in rows if not row.get("total_recorded")),
     }
 
 
@@ -2472,6 +2487,33 @@ async def admin_get_portfolio(portfolio_id: str):
             transactions.append(transaction)
         transactions.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
+        history_source = "linked" if transactions else "none"
+        related_transactions = []
+        if not transactions:
+            owner_id = str(document.get("user_id") or "")
+            house_name = str(document.get("house_name") or "").strip().lower()
+            if owner_id and house_name:
+                house_terms = {house_name}
+                if "/" in house_name:
+                    house_terms.update(part.strip() for part in house_name.split("/") if part.strip())
+                try:
+                    owner_transactions = list(transactions_collection.find({"user_id": owner_id}))
+                except Exception:
+                    owner_transactions = []
+                for transaction in owner_transactions:
+                    purpose = str(transaction.get("purpose") or "").lower()
+                    if not any(term in purpose for term in house_terms):
+                        continue
+                    transaction = dict(transaction)
+                    transaction["_id"] = str(transaction.get("_id", ""))
+                    transaction.pop("encrypted_pin", None)
+                    transaction["link_source"] = "related"
+                    related_transactions.append(transaction)
+                related_transactions.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+                related_transactions = related_transactions[:50]
+                if related_transactions:
+                    history_source = "related"
+
         return JSONResponse({
             "message": "Portfolio fetched",
             "status": 200,
@@ -2480,6 +2522,8 @@ async def admin_get_portfolio(portfolio_id: str):
                 "house": house,
                 "housing_subscription": subscription,
                 "transactions": transactions,
+                "related_transactions": related_transactions,
+                "history_source": history_source,
             },
         })
     except Exception as exc:
