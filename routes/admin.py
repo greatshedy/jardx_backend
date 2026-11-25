@@ -1996,6 +1996,8 @@ async def create_staff_account(payload: dict, admin=Depends(verify_admin_token))
             return JSONResponse({"message": "Select at least one permission", "status": 400})
 
         existing = user_collection.find_one({"email": email})
+        if not existing:
+            existing = user_collection.find_one({"email": email.upper()})
         if existing:
             return JSONResponse({"message": "A user with this email already exists", "status": 400})
 
