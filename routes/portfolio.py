@@ -14,6 +14,24 @@ logger = logging.getLogger("jardx")
 
 router = APIRouter(prefix="/users/portfolio", tags=["Portfolio"])
 
+
+def _sanitize_portfolio_doc(item):
+    """Remove secrets that must never be returned to the mobile app."""
+    clean = dict(item)
+    clean.pop("encrypted_pin", None)
+    clean.pop("transaction_pin", None)
+    return clean
+
+
+def _portfolio_house_terms(house_name):
+    name = str(house_name or "").strip().lower()
+    if not name:
+        return set()
+    terms = {name}
+    if "/" in name:
+        terms.update(part.strip() for part in name.split("/") if part.strip())
+    return terms
+
 def resolve_plan_pricing(plan):
     """Return (original_price, sale_price, discount_percent, has_plan_discount)."""
     if not isinstance(plan, dict):
@@ -962,6 +980,7 @@ def get_housing_dashboard(data: dict = Depends(get_token)):
         subscription_data = []
         total_access_limit = 0.0
         for sub in subscriptions:
+            sub = _sanitize_portfolio_doc(sub)
             sub_id = sub.get("subscription_id")
             saved = saved_by_subscription.get(sub_id, float(sub.get("total_saved", 0) or 0))
             multiplier = float(sub.get("savings_multiplier", default_multiplier) or default_multiplier)
@@ -1067,7 +1086,8 @@ def get_portfolio(data: dict = Depends(get_token)):
                     item["house_image"] = ""
             elif isinstance(h_img, str) and not h_img.startswith("data:"):
                 item["house_image"] = get_image_url(h_img)
-            
+
+        portfolio_data = [_sanitize_portfolio_doc(item) for item in portfolio_data]
         return JSONResponse(status_code=200, content={"message": "Success", "data": portfolio_data})
 
 
@@ -1085,20 +1105,50 @@ def get_portfolio_item(portfolio_id: str, data: dict = Depends(get_token)):
         item = portfolio_collection.find_one({"_id": portfolio_id, "user_id": user_id})
         if not item:
             return JSONResponse(status_code=404, content={"message": "Estate not found in your portfolio"})
-        
+
+        item = _sanitize_portfolio_doc(item)
         item["_id"] = str(item["_id"])
-        
-        # Fetch latest 5 transactions for this portfolio
+
+        # Fetch latest 5 transactions linked directly to this portfolio
         history = list(transactions_collection.find(
             {"portfolio_id": portfolio_id, "user_id": user_id},
             sort={"created_at": -1},
             limit=5
         ))
+        history = [_sanitize_portfolio_doc(entry) for entry in history]
         for h_item in history:
             h_item["_id"] = str(h_item["_id"])
-        
+
         item["payment_history"] = history
-        
+        item["payment_history_source"] = "linked" if history else "none"
+
+        # Migrated transactions often lack portfolio_id. Fall back to payments
+        # recorded for the same user and estate, clearly labelled for the app.
+        if not history:
+            house_terms = _portfolio_house_terms(item.get("house_name"))
+            if house_terms:
+                try:
+                    owner_transactions = list(transactions_collection.find({"user_id": user_id}))
+                except Exception:
+                    owner_transactions = []
+                related = []
+                for transaction in owner_transactions:
+                    purpose = str(transaction.get("purpose") or "").lower()
+                    if not any(term in purpose for term in house_terms):
+                        continue
+                    transaction = _sanitize_portfolio_doc(transaction)
+                    transaction["_id"] = str(transaction.get("_id", ""))
+                    related.append(transaction)
+                related.sort(key=lambda tx: str(tx.get("created_at") or ""), reverse=True)
+                related = related[:20]
+                if related:
+                    item["payment_history"] = related
+                    item["payment_history_source"] = "related"
+                    item["payment_history_note"] = (
+                        "These payments are linked by user and estate. "
+                        "They may not map to this exact plan in the migrated data."
+                    )
+
         # Resolve Image
         from utill import get_image_url
         h_img = item.get("house_image")
